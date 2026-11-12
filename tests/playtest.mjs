@@ -61,7 +61,12 @@ async function openPage(browser, name, ctxOptions, url = base) {
   const page = await context.newPage();
   page.on("console", (m) => m.type() === "error" && fail(`${name}: console error: ${m.text()}`));
   page.on("pageerror", (e) => fail(`${name}: page error: ${e.message}`));
-  page.on("requestfailed", (r) => fail(`${name}: request failed: ${r.url()}`));
+  page.on("requestfailed", (r) => {
+    const why = r.failure()?.errorText ?? "";
+    // The browser fetches the tab icon lazily; reloading the page (the live-link check does) cancels that fetch. Not a page error.
+    if (why === "net::ERR_ABORTED" && new URL(r.url()).pathname === "/favicon.svg") return;
+    fail(`${name}: request failed: ${r.url()} (${why})`);
+  });
   const res = await page.goto(url, { waitUntil: "networkidle" }).catch((e) => fail(`${name}: could not load ${url}: ${e.message}`));
   if (!res) return { page, context, ok: false };
   const ok = !!(await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 }).catch(() => null));
@@ -98,6 +103,31 @@ async function noHorizontalOverflow(page, name, when) {
   if (r.doc > r.view) fail(`${name}: page is ${r.doc}px wide in a ${r.view}px window (${when})`);
   if (r.offenders.length) fail(`${name}: elements outside the window (${when}): ${r.offenders.join(", ")}`);
 }
+
+/** Scribble a long wavy line and return the sorted frame times (ms) seen while drawing it. */
+async function drawWave(page) {
+  await page.evaluate(() => {
+    window.__frames = [];
+    window.__frameStop = false;
+    let last = performance.now();
+    const tick = (t) => {
+      window.__frames.push(t - last);
+      last = t;
+      if (!window.__frameStop) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  const box = await page.locator("#canvas-wrap").boundingBox();
+  await page.mouse.move(box.x + box.width * 0.05, box.y + box.height * 0.5);
+  await page.mouse.down();
+  for (let i = 1; i <= 240; i++) {
+    await page.mouse.move(box.x + box.width * (0.05 + (0.9 * i) / 240), box.y + box.height * (0.5 + 0.35 * Math.sin(i / 9)));
+  }
+  await page.mouse.up();
+  const frames = await page.evaluate(() => ((window.__frameStop = true), window.__frames.slice(2)));
+  return frames.sort((a, b) => a - b);
+}
+const percentile = (sorted, p) => sorted[Math.floor(sorted.length * p)];
 
 /** Wait until every note of the schedule has been handed to Web Audio at least once. */
 function allNotesScheduled(page, timeout = 12000) {
@@ -182,28 +212,9 @@ async function session(browser, name, viewport, colorScheme, phone) {
 
   // Drawing stays smooth: scribble a long wavy line and watch the frame times.
   await check(`${name} drawing frame rate`, async () => {
-    await page.evaluate(() => {
-      window.__frames = [];
-      window.__frameStop = false;
-      let last = performance.now();
-      const tick = (t) => {
-        window.__frames.push(t - last);
-        last = t;
-        if (!window.__frameStop) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
-    const box = await page.locator("#canvas-wrap").boundingBox();
-    await page.mouse.move(box.x + box.width * 0.05, box.y + box.height * 0.5);
-    await page.mouse.down();
-    for (let i = 1; i <= 240; i++) {
-      await page.mouse.move(box.x + box.width * (0.05 + (0.9 * i) / 240), box.y + box.height * (0.5 + 0.35 * Math.sin(i / 9)));
-    }
-    await page.mouse.up();
-    const frames = await page.evaluate(() => ((window.__frameStop = true), window.__frames.slice(2)));
-    frames.sort((a, b) => a - b);
-    const p50 = frames[Math.floor(frames.length * 0.5)];
-    const p95 = frames[Math.floor(frames.length * 0.95)];
+    const frames = await drawWave(page);
+    const p50 = percentile(frames, 0.5);
+    const p95 = percentile(frames, 0.95);
     console.log(`${name}: ${frames.length} frames while drawing, median ${p50.toFixed(1)} ms, p95 ${p95.toFixed(1)} ms`);
     assert.ok(p50 < 20, `median frame time was ${p50.toFixed(1)} ms while drawing`);
     assert.equal((await hook.song(page)).strokes.length, 1);
@@ -457,6 +468,101 @@ async function fullSong(browser, name, viewport, phone) {
   await context.close();
 }
 
+// After Share, the address bar follows the song: every edit, then a reload, gives the song on screen.
+// Before Share, drawing leaves the address alone. No edit adds a Back step.
+async function liveLink(browser, name, viewport, phone) {
+  const ctxOptions = phone ? { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme: "dark" };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const hash = () => page.evaluate(() => location.hash);
+  const historyLength = await page.evaluate(() => history.length);
+  /** Wait for the address bar to move on from `before` (it is written when the page is idle, just after the edit). */
+  const followed = (before, what) =>
+    page
+      .waitForFunction((prev) => location.hash !== prev && location.hash.startsWith("#v1."), before, { timeout: 3000, polling: 20 })
+      .catch(() => {
+        throw new Error(`the link in the address bar did not follow the song after ${what}`);
+      });
+  /** Reload and check the page opens to exactly the song that was on screen. */
+  const reloadsTo = async (what) => {
+    const want = { song: await hook.song(page), schedule: await hook.schedule(page) };
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.deepEqual(await hook.song(page), want.song, `reload after ${what} opened a different song (strokes, colours, sizes or tempo)`);
+    assert.deepEqual(await hook.schedule(page), want.schedule, `reload after ${what} gave a different note schedule`);
+    assert.equal(await page.locator("#tempo").inputValue(), String(want.song.bpm), `tempo control after ${what}`);
+    assert.equal(await page.evaluate(() => history.length), historyLength, `${what} added a browser-history entry`);
+  };
+  /** Make an edit after Share, wait for the link to follow, then reload (a reload forgets the undo history). */
+  const step = async (what, edit, reload = true) => {
+    const before = await hash();
+    await edit();
+    await followed(before, what);
+    if (reload) await reloadsTo(what);
+  };
+
+  await check(`${name} before Share the address bar is left alone`, async () => {
+    await pickColour(page, "Pluck");
+    await setSize(page, 6);
+    await drawLine(page, 0.05, 0.3, rowCentre(5));
+    await drawLine(page, 0.35, 0.6, rowCentre(9));
+    await page.keyboard.press("Control+z");
+    await setTempo(page, 100);
+    await page.waitForTimeout(600);
+    assert.equal(await hook.song(page).then((s) => s.strokes.length), 1);
+    assert.equal(await hash(), "", "the address changed before Share was pressed");
+  });
+
+  let shared = "";
+  await check(`${name} share, then the link follows every edit`, async () => {
+    await press(page, phone ? "tap" : "click", "#share");
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+    shared = await hash();
+    await reloadsTo("Share");
+
+    await step("drawing a stroke", async () => {
+      await pickColour(page, "Pad");
+      await setSize(page, 2);
+      await drawLine(page, 0.5, 0.9, rowCentre(11));
+    });
+    await step("drawing another stroke", async () => {
+      await pickColour(page, "Tap");
+      await setSize(page, 8);
+      await drawLine(page, 0.2, 0.45, rowCentre(1));
+    }, false);
+    assert.equal((await hook.song(page)).strokes.length, 3);
+    await step("undo", () => page.keyboard.press("Control+z"));
+    assert.equal((await hook.song(page)).strokes.length, 2);
+    await step("changing the tempo", () => setTempo(page, 72));
+    await step("clear", () => page.locator("#clear").click());
+    assert.equal((await hook.song(page)).strokes.length, 0, "clear should reload to an empty canvas");
+    assert.ok(await page.locator("#hint").isVisible(), "hint after reloading a cleared song");
+    await step("drawing after clear", async () => {
+      await pickColour(page, "Bell");
+      await setSize(page, 5);
+      await drawLine(page, 0.1, 0.7, rowCentre(7));
+    });
+    assert.notEqual(await hash(), shared);
+  });
+
+  await check(`${name} drawing stays smooth while the link follows`, async () => {
+    const before = await hash();
+    const frames = await drawWave(page);
+    const p50 = percentile(frames, 0.5);
+    console.log(`${name}: ${frames.length} frames while drawing after Share, median ${p50.toFixed(1)} ms, p95 ${percentile(frames, 0.95).toFixed(1)} ms`);
+    assert.ok(p50 < 20, `median frame time was ${p50.toFixed(1)} ms while drawing after Share`);
+    await followed(before, "drawing a long line");
+    await reloadsTo("drawing a long line");
+  });
+  await page.screenshot({ path: join(out, `${name}-reloaded.png`) });
+
+  await check(`${name} Back leaves the page`, async () => {
+    await page.goBack({ waitUntil: "commit" });
+    assert.ok(!page.url().startsWith(base), `Back stayed on the page: ${page.url()}`);
+  });
+  await context.close();
+}
+
 // Broken links must open to an empty canvas, quietly.
 async function malformedLinks(browser) {
   const name = "bad links";
@@ -491,6 +597,8 @@ const browser = await chromium.launch(launchOptions);
 try {
   await session(browser, "desktop-dark", { width: 1280, height: 900 }, "dark", false);
   await session(browser, "phone-light", { width: 390, height: 844 }, "light", true);
+  await liveLink(browser, "live-desktop", { width: 1280, height: 900 }, false);
+  await liveLink(browser, "live-phone", { width: 390, height: 844 }, true);
   await malformedLinks(browser);
   await fullSong(browser, "full-desktop", { width: 1280, height: 900 }, false);
   await fullSong(browser, "full-phone", { width: 390, height: 844 }, true);

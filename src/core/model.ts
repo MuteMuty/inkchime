@@ -25,6 +25,11 @@ export const VOICE_COUNT = VOICE_NAMES.length;
 /** Limits that keep a shared link small and a malicious one harmless. */
 export const MAX_STROKES = 400;
 export const MAX_POINTS = 1500;
+/** Longest share-link payload (after `#v1.`) that opens. The encoder is checked against it, the decoder enforces it. */
+export const MAX_PAYLOAD_CHARS = 120_000;
+
+/** Drawing, undo-free: may another stroke be added to a song that already holds `count`? */
+export const canAddStroke = (count: number): boolean => count < MAX_STROKES;
 
 export interface Stroke {
   readonly color: number;

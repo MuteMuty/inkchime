@@ -31,7 +31,7 @@ export function normalizePoints(raw: readonly number[]): number[] {
 }
 
 /** Ramer-Douglas-Peucker, iterative so a long scribble can't overflow the stack. */
-function simplify(pts: readonly number[], eps: number): number[] {
+export function simplify(pts: readonly number[], eps: number): number[] {
   const n = pts.length / 2;
   if (n < 3) return pts.slice();
   const keep = new Uint8Array(n);

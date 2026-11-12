@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeSong, decodeSong, songToHash, songFromHash } from "../../src/core/share.ts";
+import { encodeSong, decodeSong, songToHash, songFromHash, prepareShare } from "../../src/core/share.ts";
 import { songToNotes } from "../../src/core/notes.ts";
 import { normalizePoints } from "../../src/core/stroke.ts";
-import { GRID, BPM_MIN, BPM_MAX, MAX_STROKES, MAX_POINTS, VOICE_COUNT, SIZE_MIN, SIZE_MAX, type Song, type Stroke } from "../../src/core/model.ts";
+import { GRID, BPM_MIN, BPM_MAX, MAX_STROKES, MAX_POINTS, MAX_PAYLOAD_CHARS, VOICE_COUNT, SIZE_MIN, SIZE_MAX, type Song, type Stroke } from "../../src/core/model.ts";
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -135,4 +135,74 @@ test("out-of-range fields are rejected", () => {
   assert.equal(decodeSong(encodeSong({ bpm: 90, strokes: [{ color: 0, size: SIZE_MAX + 1, pts: [1, 2] }] })), null);
   assert.equal(decodeSong(encodeSong({ bpm: 90, strokes: [{ color: 0, size: 4, pts: [GRID, 2] }] })), null);
   assert.equal(decodeSong(encodeSong({ bpm: 90, strokes: [{ color: 0, size: 4, pts: [] }] })), null);
+});
+
+// --- verify before sharing ---------------------------------------------------
+
+/** A full song of short lines: the largest song the drawing guard allows. */
+function fullSong(count: number): Song {
+  const strokes: Stroke[] = [];
+  for (let i = 0; i < count; i++) strokes.push({ color: i % VOICE_COUNT, size: 1 + (i % 8), pts: [20 + (i % 900), 100 + (i % 800), 60 + (i % 900), 140 + (i % 800)] });
+  return { bpm: 90, strokes };
+}
+
+/** `count` strokes of `n` points each. `wobble` is the vertical zigzag in grid units. */
+function longStrokes(count: number, n: number, wobble: number, chaotic: boolean): Song {
+  const r = rng(5);
+  const strokes: Stroke[] = [];
+  for (let s = 0; s < count; s++) {
+    const pts: number[] = [];
+    let x = 0, y = 500;
+    for (let i = 0; i < n; i++) {
+      if (chaotic) {
+        x = Math.floor(r() * GRID);
+        y = Math.floor(r() * GRID);
+      } else {
+        x = Math.floor((i * (GRID - 1)) / (n - 1));
+        y = 500 + (i % 2 ? wobble : -wobble) + (s % 3);
+      }
+      pts.push(x, y);
+    }
+    strokes.push({ color: s % VOICE_COUNT, size: 4, pts });
+  }
+  return { bpm: 90, strokes };
+}
+
+test("prepareShare: a full song of MAX_STROKES strokes gives a link that reproduces it exactly", () => {
+  const song = fullSong(MAX_STROKES);
+  const res = prepareShare(song);
+  assert.ok(res.ok);
+  if (!res.ok) return;
+  assert.deepEqual(songFromHash(res.hash), song);
+  assert.equal(res.simplified, false);
+});
+
+test("prepareShare: one stroke over the limit is refused, never shared", () => {
+  const res = prepareShare(fullSong(MAX_STROKES + 1));
+  assert.equal(res.ok, false);
+});
+
+test("prepareShare: an empty song is refused", () => {
+  assert.equal(prepareShare({ bpm: 90, strokes: [] }).ok, false);
+});
+
+test("prepareShare: a song past the payload cap is simplified until it fits, and still sounds the same", () => {
+  const song = longStrokes(60, 1500, 4, false);
+  assert.ok(encodeSong(song).length > MAX_PAYLOAD_CHARS, "test song should be too big as it is");
+  assert.equal(decodeSong(encodeSong(song)), null, "and an unverified link would open empty");
+  const res = prepareShare(song);
+  assert.ok(res.ok, "should have been made to fit");
+  if (!res.ok) return;
+  assert.equal(res.simplified, true);
+  const back = songFromHash(res.hash);
+  assert.ok(back, "the link must open");
+  assert.deepEqual(songToNotes(back), songToNotes(song), "same notes");
+  assert.deepEqual(back.strokes.map((s) => [s.color, s.size]), song.strokes.map((s) => [s.color, s.size]));
+  assert.ok(res.hash.length <= MAX_PAYLOAD_CHARS + 4);
+});
+
+test("prepareShare: a song that cannot be made to fit without changing its sound is refused honestly", () => {
+  const song = longStrokes(60, 1500, 0, true);
+  assert.ok(encodeSong(song).length > MAX_PAYLOAD_CHARS);
+  assert.equal(prepareShare(song).ok, false);
 });

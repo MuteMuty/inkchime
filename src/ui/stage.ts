@@ -9,6 +9,8 @@ import { COLS, GRID, ROWS, VOICE_COUNT, type Stroke } from "../core/model.ts";
 export const brushPx = (size: number): number => 4 + size * 3;
 
 export interface StageHandlers {
+  /** Asked before a stroke begins. Return false to ignore this press entirely. */
+  canStart(): boolean;
   /** Pointer went down at (x, y), as fractions of the canvas. */
   onStart(x: number, y: number): void;
   onMove(x: number, y: number): void;
@@ -230,6 +232,7 @@ export class Stage {
   private down(e: PointerEvent): void {
     if (this.pointerId !== -1) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (!this.handlers.canStart()) return;
     this.pointerId = e.pointerId;
     this.wrap.setPointerCapture(e.pointerId);
     this.rect = this.wrap.getBoundingClientRect();

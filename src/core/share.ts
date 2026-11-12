@@ -4,12 +4,12 @@
 //   version(1) bpm(varint) strokeCount(varint)
 //   per stroke: colour<<4 | size (1 byte), pointCount(varint), x0(varint), y0(varint),
 //               then (dx, dy) zigzag varints for every further point
-import { BPM_MAX, BPM_MIN, GRID, MAX_POINTS, MAX_STROKES, SIZE_MAX, SIZE_MIN, VOICE_COUNT, type Song, type Stroke } from "./model.ts";
+import { songToNotes } from "./notes.ts";
+import { simplify } from "./stroke.ts";
+import { BPM_MAX, BPM_MIN, GRID, MAX_PAYLOAD_CHARS, MAX_POINTS, MAX_STROKES, SIZE_MAX, SIZE_MIN, VOICE_COUNT, type Song, type Stroke } from "./model.ts";
 
 const VERSION = 1;
 const PREFIX = "v1.";
-/** Longest payload we will even look at. A full song is far smaller. */
-const MAX_PAYLOAD_CHARS = 120_000;
 
 // --- bytes <-> base64url ---------------------------------------------------
 
@@ -137,4 +137,39 @@ export const songToHash = (song: Song): string => "#" + PREFIX + encodeSong(song
 export function songFromHash(hash: string): Song | null {
   const h = hash.startsWith("#") ? hash.slice(1) : hash;
   return h.startsWith(PREFIX) ? decodeSong(h.slice(PREFIX.length)) : null;
+}
+
+// --- sharing safely --------------------------------------------------------
+
+/** Tolerances (grid units) tried, in order, when a song is too big to share as it is. */
+const SHARE_TOLERANCES = [3, 6, 12, 24];
+
+export type ShareResult =
+  | { readonly ok: true; readonly hash: string; /** true if points were dropped to fit; the notes are unchanged */ readonly simplified: boolean }
+  | { readonly ok: false };
+
+const sameSong = (a: Song, b: Song): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Builds the link to share, and only returns one that opens to this song.
+ * The link is decoded again and compared. If it is too long or over a limit, the
+ * points are simplified a little more, but only as far as the notes stay identical.
+ * Otherwise there is no link (`ok: false`), so Share never hands out a dead one.
+ */
+export function prepareShare(song: Song): ShareResult {
+  if (!song.strokes.length || song.strokes.length > MAX_STROKES) return { ok: false };
+  const hash = songToHash(song);
+  const back = songFromHash(hash);
+  if (back && sameSong(back, song)) return { ok: true, hash, simplified: false };
+
+  const notes = JSON.stringify(songToNotes(song));
+  for (const eps of SHARE_TOLERANCES) {
+    const smaller: Song = { bpm: song.bpm, strokes: song.strokes.map((s) => ({ ...s, pts: simplify(s.pts, eps) })) };
+    const smallerHash = songToHash(smaller);
+    const opened = songFromHash(smallerHash);
+    if (opened && sameSong(opened, smaller) && JSON.stringify(songToNotes(opened)) === notes) {
+      return { ok: true, hash: smallerHash, simplified: true };
+    }
+  }
+  return { ok: false };
 }

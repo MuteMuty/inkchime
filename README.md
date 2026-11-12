@@ -30,6 +30,8 @@ The built page is about 8 KB of JavaScript gzipped, no dependencies at runtime, 
 
 `#v1.` and then URL-safe base64 of: a version byte, the tempo, and for each stroke its colour and size, then its points as a start position plus zigzag-varint deltas. Strokes are quantised to a 1024 by 1024 grid and simplified when you lift the pen, so the song in memory is exactly the song a link rebuilds. A straight line costs about 20 characters and a long hand-drawn wave about 150. A link that is malformed, truncated or out of range opens an empty canvas and never throws.
 
+A song holds at most 400 strokes (drawing stops there, with a note), and a link payload is at most 120,000 characters; both limits live in `core/model.ts` and are used by drawing, encoder and decoder. Share decodes the link it is about to copy and only claims success if it opens to the same song. If the payload is too long it simplifies the points further, but only as far as the notes stay identical; otherwise it says the song is too big to share.
+
 ## Run it
 
 ```sh

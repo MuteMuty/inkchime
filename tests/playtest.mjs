@@ -395,6 +395,68 @@ async function session(browser, name, viewport, colorScheme, phone) {
   await context.close();
 }
 
+// A full song: the 401st stroke is blocked with a toast, and Share on the 400 gives a link that opens identically.
+async function fullSong(browser, name, viewport, phone) {
+  const ctxOptions = phone ? { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme: "dark" };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const box = await page.locator("#canvas-wrap").boundingBox();
+  /** A short stroke, drawn with the real pointer: down, two moves, up. Each one lands in a different place. */
+  const quick = async (i) => {
+    const x = box.x + box.width * (0.04 + 0.08 * (i % 10));
+    const y = box.y + box.height * ((1 + (i % 13)) / 15);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + box.width * 0.04, y + 6, { steps: 2 });
+    await page.mouse.move(x + box.width * 0.07, y);
+    await page.mouse.up();
+  };
+  const count = async () => (await hook.song(page)).strokes.length;
+  const toastText = () => page.locator("#toast").innerText();
+
+  await check(`${name} drawing up to the limit`, async () => {
+    for (let i = 0; i < 400; i++) await quick(i);
+    assert.equal(await count(), 400, "should hold 400 strokes");
+    assert.ok(!(await page.locator("#toast").evaluate((el) => el.classList.contains("show"))), "no toast before the limit is hit");
+  });
+  await check(`${name} the 401st stroke is blocked`, async () => {
+    await quick(401);
+    assert.equal(await count(), 400, "stroke count must stay at 400");
+    await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 2000 });
+    assert.match(await toastText(), /most this song can hold/);
+    assert.equal(await page.evaluate(() => window.__inkchime.song().strokes.length), 400);
+  });
+  await page.screenshot({ path: join(out, `${name}-full.png`) });
+
+  const original = { song: await hook.song(page), schedule: await hook.schedule(page) };
+  let url = "";
+  await check(`${name} sharing a full song`, async () => {
+    await page.locator("#share").click();
+    await page.waitForFunction(() => /^Link copied/.test(document.querySelector("#toast").textContent), null, { timeout: 3000 });
+    url = page.url();
+    assert.ok(url.includes("#v1."));
+  });
+  if (url) {
+    const fresh = await openPage(browser, `${name} (opened link)`, ctxOptions, url);
+    if (fresh.ok) {
+      await check(`${name} full-song link opens identically`, async () => {
+        assert.deepEqual(await hook.song(fresh.page), original.song, "the link opened a different song");
+        assert.deepEqual(await hook.schedule(fresh.page), original.schedule, "note schedule differs");
+        assert.equal((await hook.song(fresh.page)).strokes.length, 400);
+      });
+    }
+    await fresh.context.close();
+  }
+  await check(`${name} undo makes room again`, async () => {
+    await page.keyboard.press("Control+z");
+    assert.equal(await count(), 399);
+    await quick(7);
+    assert.equal(await count(), 400);
+  });
+  await noHorizontalOverflow(page, name, "full song");
+  await context.close();
+}
+
 // Broken links must open to an empty canvas, quietly.
 async function malformedLinks(browser) {
   const name = "bad links";
@@ -430,6 +492,8 @@ try {
   await session(browser, "desktop-dark", { width: 1280, height: 900 }, "dark", false);
   await session(browser, "phone-light", { width: 390, height: 844 }, "light", true);
   await malformedLinks(browser);
+  await fullSong(browser, "full-desktop", { width: 1280, height: 900 }, false);
+  await fullSong(browser, "full-phone", { width: 390, height: 844 }, true);
 } finally {
   await browser.close();
 }

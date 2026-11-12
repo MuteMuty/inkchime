@@ -1,9 +1,9 @@
 import "./style.css";
-import { BPM_DEFAULT, BPM_MAX, BPM_MIN, GRID, SIZE_DEFAULT, VOICE_COUNT, VOICE_NAMES, type Note, type Song, type Stroke } from "./core/model.ts";
+import { BPM_DEFAULT, BPM_MAX, BPM_MIN, GRID, canAddStroke, SIZE_DEFAULT, VOICE_COUNT, VOICE_NAMES, type Note, type Song, type Stroke } from "./core/model.ts";
 import { History } from "./core/history.ts";
 import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
-import { songFromHash, songToHash } from "./core/share.ts";
+import { prepareShare, songFromHash } from "./core/share.ts";
 import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { Player, type NoteEvent } from "./audio/player.ts";
@@ -57,6 +57,11 @@ function preview(yFraction: number): void {
 }
 
 const stage = new Stage($("#canvas-wrap"), {
+  canStart() {
+    if (canAddStroke(edits.value.length)) return true;
+    toast("That's the most this song can hold. Undo or clear to draw more.");
+    return false;
+  },
   onStart(_x, y) {
     previewDegree = -1;
     $("#hint").classList.add("gone");
@@ -65,7 +70,7 @@ const stage = new Stage($("#canvas-wrap"), {
   onMove: (_x, y) => preview(y),
   onEnd(raw) {
     const pts = normalizePoints(raw);
-    if (!pts.length) return;
+    if (!pts.length || !canAddStroke(edits.value.length)) return;
     const stroke: Stroke = { color, size, pts };
     edits.set([...edits.value, stroke]);
     songChanged();
@@ -195,7 +200,10 @@ function toast(text: string): void {
 
 $("#share").addEventListener("click", async () => {
   if (!edits.value.length) return toast("Draw something first, then share it.");
-  lastSharedHash = songToHash(song());
+  // Only hand out a link that has been opened again here and found to be this song.
+  const shared = prepareShare(song());
+  if (!shared.ok) return toast("This song is too big to share as a link. Undo or clear a few lines and try again.");
+  lastSharedHash = shared.hash;
   setHash(lastSharedHash);
   try {
     await navigator.clipboard.writeText(location.href);

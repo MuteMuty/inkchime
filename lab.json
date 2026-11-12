@@ -1,0 +1,14 @@
+{
+  "name": "inkchime",
+  "url": "https://inkchime.brightloopapps.com",
+  "worker": "inkchime",
+  "commands": {
+    "install": "npm ci",
+    "test": "npm test",
+    "build": "npm run build",
+    "serve": "npx vite preview --port {port} --strictPort",
+    "playtest": "node tests/playtest.mjs",
+    "deploy": "npx wrangler deploy"
+  },
+  "smoke": ["/"]
+}

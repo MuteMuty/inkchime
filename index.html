@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Inkchime: draw lines, hear music</title>
+    <meta name="description" content="Draw on the canvas and a playhead plays your lines. Height is pitch, thickness is volume, colour is the instrument." />
+    <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f6f2ea" media="(prefers-color-scheme: light)" />
+    <meta property="og:title" content="Inkchime" />
+    <meta property="og:description" content="Draw lines, hear music. Share your song as a link." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <header class="top">
+      <h1 class="brand">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 21c4-12 8-12 12-3s8 9 12-7" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" /><circle cx="16" cy="18" r="2.6" fill="currentColor" /></svg>
+        Inkchime
+      </h1>
+      <p class="tagline">Draw lines, hear music</p>
+    </header>
+
+    <main class="stage">
+      <div id="canvas-wrap" class="canvas-wrap" role="img" aria-label="Drawing canvas. Draw with a mouse, finger or pen. Height is pitch, thickness is volume, colour is the instrument.">
+        <canvas id="paper" class="layer"></canvas>
+        <canvas id="live" class="layer"></canvas>
+        <canvas id="fx" class="layer"></canvas>
+        <div id="playhead" class="playhead" aria-hidden="true"></div>
+        <div id="hint" class="hint">
+          <p class="hint-main">Draw a line, then press play.</p>
+          <p class="hint-sub">Height is pitch. Thickness is volume. Colour is the instrument.</p>
+          <p class="hint-keys">Space plays and pauses. Ctrl or ⌘ Z undoes.</p>
+        </div>
+      </div>
+    </main>
+
+    <section class="dock" aria-label="Tools">
+      <fieldset class="voices">
+        <legend class="sr-only">Colour and instrument</legend>
+        <label class="voice" style="--c: var(--c0)">
+          <input type="radio" name="voice" value="0" checked />
+          <span class="chip"><span class="dot"></span><span class="name">Bell</span></span>
+        </label>
+        <label class="voice" style="--c: var(--c1)">
+          <input type="radio" name="voice" value="1" />
+          <span class="chip"><span class="dot"></span><span class="name">Pluck</span></span>
+        </label>
+        <label class="voice" style="--c: var(--c2)">
+          <input type="radio" name="voice" value="2" />
+          <span class="chip"><span class="dot"></span><span class="name">Pad</span></span>
+        </label>
+        <label class="voice" style="--c: var(--c3)">
+          <input type="radio" name="voice" value="3" />
+          <span class="chip"><span class="dot"></span><span class="name">Tap</span></span>
+        </label>
+      </fieldset>
+
+      <div class="transport">
+        <button id="play" class="primary" type="button" title="Play or pause (Space)">
+          <svg class="icon icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor" /></svg>
+          <svg class="icon icon-pause" viewBox="0 0 16 16" aria-hidden="true" hidden><path d="M3.5 2.5h3.2v11H3.5zM9.3 2.5h3.2v11H9.3z" fill="currentColor" /></svg>
+          <span id="play-label">Play</span>
+        </button>
+        <button id="undo" type="button" title="Undo (Ctrl or ⌘ Z)" aria-disabled="true">Undo</button>
+        <button id="clear" type="button" title="Clear the canvas" aria-disabled="true">Clear</button>
+        <button id="share" type="button" title="Copy a link to this song">Share</button>
+      </div>
+
+      <div class="sliders">
+        <label class="slider" title="Thicker lines are louder">
+          <span class="slider-name">Brush <i id="brush-dot" class="brush-dot" aria-hidden="true"></i></span>
+          <input id="size" type="range" min="1" max="8" step="1" value="4" aria-describedby="size-help" />
+          <span id="size-help" class="sr-only">Thicker lines are louder.</span>
+        </label>
+        <label class="slider" title="Loop speed">
+          <span class="slider-name">Tempo <output id="bpm-out" for="tempo">90 bpm</output></span>
+          <input id="tempo" type="range" min="60" max="120" step="1" value="90" />
+        </label>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <footer class="foot">
+      <p>Made at BrightLoop Lab, built with AI at the speed of thought.</p>
+    </footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob",
+        "hooks": [{ "type": "command", "command": "node /Users/erikpahor/brightloop-lab/lab/nightshift/bin/guard.mjs" }]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": ["Bash(sudo:*)", "Bash(gh repo delete:*)", "Bash(git push --force:*)"]
+  }
+}

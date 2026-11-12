@@ -82,6 +82,7 @@ async function drawLine(page, x0, x1, y) {
 const pickColour = (page, name) => page.locator("label.voice", { hasText: name }).click();
 const setSize = (page, v) => page.locator("#size").fill(String(v));
 const setTempo = (page, v) => page.locator("#tempo").fill(String(v));
+const toastShown = (page) => page.locator("#toast").evaluate((el) => el.classList.contains("show"));
 const press = (page, how, sel) => (how === "tap" ? page.locator(sel).tap() : page.locator(sel).click());
 
 async function noHorizontalOverflow(page, name, when) {
@@ -248,6 +249,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
   await check(`${name} audio starts`, async () => {
     await page.waitForFunction(() => window.__inkchime.state().audio === "running", null, { timeout: 5000 });
     assert.equal((await page.locator("#play-label").innerText()), "Pause");
+    assert.equal(await toastShown(page), false, "no toast when there is something to play");
   });
   await check(`${name} playing schedules the stroke's notes`, async () => {
     await allNotesScheduled(page);
@@ -376,6 +378,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
       await fresh.page.screenshot({ path: join(out, `${name}-opened-link.png`) });
       await check(`${name} link plays the same notes`, async () => {
         await fresh.page.keyboard.press("Space");
+        assert.equal(await toastShown(fresh.page), false, "no toast when a shared song plays");
         await allNotesScheduled(fresh.page);
         const state = await hook.state(fresh.page);
         checkEvents(`${name} (opened link)`, await hook.events(fresh.page), state, {});
@@ -457,6 +460,30 @@ async function fullSong(browser, name, viewport, phone) {
   await context.close();
 }
 
+// Play on an empty canvas says so, but the playhead still runs and picks up a line drawn meanwhile.
+async function emptyPlay(browser, name, viewport, phone, key) {
+  const ctxOptions = phone ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  await check(`${name} play on an empty canvas`, async () => {
+    assert.equal((await hook.song(page)).strokes.length, 0);
+    if (key) await page.keyboard.press("Space");
+    else await press(page, phone ? "tap" : "click", "#play");
+    await page.waitForFunction(() => document.querySelector("#toast").classList.contains("show"), null, { timeout: 2000 }).catch(() => {
+      throw new Error("no toast after Play on an empty canvas");
+    });
+    assert.match(await page.locator("#toast").innerText(), /^Nothing to play yet\./);
+    assert.equal(await page.locator("#play-label").innerText(), "Pause");
+    assert.equal((await hook.state(page)).playing, true, "the playhead should still run");
+  });
+  await check(`${name} a line drawn while playing is heard`, async () => {
+    await drawLine(page, 0.05, 0.95, 0.5);
+    await allNotesScheduled(page);
+    assert.equal(await page.locator("#play-label").innerText(), "Pause");
+  });
+  await context.close();
+}
+
 // Broken links must open to an empty canvas, quietly.
 async function malformedLinks(browser) {
   const name = "bad links";
@@ -491,6 +518,9 @@ const browser = await chromium.launch(launchOptions);
 try {
   await session(browser, "desktop-dark", { width: 1280, height: 900 }, "dark", false);
   await session(browser, "phone-light", { width: 390, height: 844 }, "light", true);
+  await emptyPlay(browser, "empty-play-desktop", { width: 1280, height: 900 }, false, false);
+  await emptyPlay(browser, "empty-play-space", { width: 1280, height: 900 }, false, true);
+  await emptyPlay(browser, "empty-play-phone", { width: 390, height: 844 }, true, false);
   await malformedLinks(browser);
   await fullSong(browser, "full-desktop", { width: 1280, height: 900 }, false);
   await fullSong(browser, "full-phone", { width: 390, height: 844 }, true);

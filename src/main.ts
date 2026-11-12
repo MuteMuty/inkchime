@@ -122,7 +122,11 @@ function syncPlayUi(): void {
 
 function toggle(): void {
   if (player.playing) player.pause();
-  else player.play();
+  else {
+    player.play();
+    // The playhead still runs, so a line drawn now is heard; just say why it is quiet.
+    if (!edits.value.length) toast("Nothing to play yet. Draw a line first.");
+  }
   syncPlayUi();
   kick();
 }

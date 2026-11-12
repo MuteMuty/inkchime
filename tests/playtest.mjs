@@ -457,6 +457,70 @@ async function fullSong(browser, name, viewport, phone) {
   await context.close();
 }
 
+// The toast uses the width it has: centred, inside the window (and any safe-area inset), and short enough to read.
+const LONGEST_TOAST = "This song is too big to share as a link. Undo or clear a few lines and try again.";
+async function toastLayout(browser, name, viewport, colorScheme, phone, maxLines) {
+  const ctxOptions = phone ? { viewport, colorScheme, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const measure = () =>
+    page.evaluate(() => {
+      const el = document.querySelector("#toast");
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+      const b = el.getBoundingClientRect();
+      return { lines, left: b.left, right: b.right, width: b.width, view: document.documentElement.clientWidth, text: el.textContent };
+    });
+  const assertLayout = (m, lines, inset = 0) => {
+    const said = `"${m.text.slice(0, 24)}…"`;
+    assert.ok(m.lines <= lines, `${said} wraps to ${m.lines} lines in a ${Math.round(m.width)}px pill (at most ${lines})`);
+    assert.ok(m.left >= inset - 0.5 && m.right <= m.view - inset + 0.5, `${said} spans ${m.left.toFixed(1)} to ${m.right.toFixed(1)} in a ${m.view}px window with ${inset}px insets`);
+    assert.ok(Math.abs(m.left - (m.view - m.right)) <= 1, `${said} is off centre (${m.left.toFixed(1)} left, ${(m.view - m.right).toFixed(1)} right)`);
+  };
+  const showToast = async (text) => {
+    await page.evaluate((t) => {
+      const el = document.querySelector("#toast");
+      el.textContent = t;
+      el.classList.add("show");
+    }, text);
+    await page.waitForTimeout(250);
+  };
+
+  await check(`${name} toast fits`, async () => {
+    await drawLine(page, 0.1, 0.5, 0.5);
+    await press(page, phone ? "tap" : "click", "#share");
+    await page.waitForFunction(() => /^Link copied/.test(document.querySelector("#toast").textContent), null, { timeout: 3000 });
+    await page.waitForTimeout(250);
+    assertLayout(await measure(), maxLines.short);
+    await page.screenshot({ path: join(out, `${name}-toast.png`) });
+    await showToast(LONGEST_TOAST);
+    assertLayout(await measure(), maxLines.long);
+  });
+
+  // A notched phone: with 44px safe-area insets either side, the pill still sits inside them, centred.
+  if (phone) {
+    const cdp = await context.newCDPSession(page);
+    const inset = 44;
+    const supported = await cdp
+      .send("Emulation.setSafeAreaInsetsOverride", { insets: { left: inset, right: inset, top: 0, bottom: 0 } })
+      .then(() => true)
+      .catch(() => false);
+    if (supported) {
+      await check(`${name} toast inside safe-area insets`, async () => {
+        await showToast(LONGEST_TOAST);
+        const m = await measure();
+        assert.ok(m.left >= inset - 0.5 && m.right <= m.view - inset + 0.5, `toast spans ${m.left.toFixed(1)} to ${m.right.toFixed(1)}, inside ${inset}px insets`);
+        assert.ok(Math.abs(m.left - (m.view - m.right)) <= 1, "toast is off centre with insets");
+        await page.screenshot({ path: join(out, `${name}-toast-insets.png`) });
+      });
+    } else {
+      console.log(`${name}: this browser can't emulate safe-area insets, skipped that toast check`);
+    }
+  }
+  await context.close();
+}
+
 // Broken links must open to an empty canvas, quietly.
 async function malformedLinks(browser) {
   const name = "bad links";
@@ -491,6 +555,9 @@ const browser = await chromium.launch(launchOptions);
 try {
   await session(browser, "desktop-dark", { width: 1280, height: 900 }, "dark", false);
   await session(browser, "phone-light", { width: 390, height: 844 }, "light", true);
+  await toastLayout(browser, "toast-phone-light", { width: 390, height: 844 }, "light", true, { short: 2, long: 3 });
+  await toastLayout(browser, "toast-phone-dark", { width: 390, height: 844 }, "dark", true, { short: 2, long: 3 });
+  await toastLayout(browser, "toast-desktop-dark", { width: 1280, height: 900 }, "dark", false, { short: 1, long: 1 });
   await malformedLinks(browser);
   await fullSong(browser, "full-desktop", { width: 1280, height: 900 }, false);
   await fullSong(browser, "full-phone", { width: 390, height: 844 }, true);

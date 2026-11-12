@@ -302,11 +302,17 @@ input[type="range"]:focus-visible { outline: 2.5px solid var(--focus); outline-o
 
 /* ---- toast and footer ---- */
 
+/* Pinned between the side gutters (or the safe-area insets, if wider) and centred with auto
+   margins, so it can use the whole width. With left: 50% its shrink-to-fit width was capped at
+   half the window. */
 .toast {
   position: fixed;
-  left: 50%;
+  left: max(16px, env(safe-area-inset-left));
+  right: max(16px, env(safe-area-inset-right));
   top: max(3.4rem, calc(env(safe-area-inset-top) + 2.8rem));
-  transform: translate(-50%, -8px);
+  width: fit-content;
+  margin-inline: auto;
+  transform: translateY(-8px);
   padding: 0.5rem 1rem;
   background: var(--ink);
   color: var(--paper);
@@ -315,10 +321,9 @@ input[type="range"]:focus-visible { outline: 2.5px solid var(--focus); outline-o
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s, transform 0.2s;
-  max-width: calc(100vw - 32px);
   text-align: center;
 }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show { opacity: 1; transform: none; }
 
 .foot { padding: 0.2rem 1rem calc(0.6rem + env(safe-area-inset-bottom)); text-align: center; }
 .foot p { margin: 0; color: var(--ink-dim); font-size: 0.78rem; }

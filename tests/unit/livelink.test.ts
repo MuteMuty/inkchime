@@ -46,28 +46,66 @@ test("linkFor: a song that can't be linked faithfully gives no link", () => {
 
 // --- LiveLink --------------------------------------------------------------------
 
-/** A LiveLink wired to a fake scheduler, so the test decides when "idle" comes. */
+/**
+ * A LiveLink wired to a fake scheduler and clock, so the test decides when "idle" comes.
+ * Each idle moment moves the clock on a second; `refuse` makes the writer throw like a
+ * browser past its address-bar budget.
+ */
 function rig(start: Song) {
   let current = start;
+  let clock = 0;
+  let refuse = false;
+  let refused = 0;
   const writes: string[] = [];
   const queue: (() => void)[] = [];
+  const delays: number[] = [];
+  const dues: number[] = [];
   let behind = 0;
   const live = new LiveLink({
     song: () => current,
-    write: (h) => writes.push(h),
-    schedule: (run) => {
-      queue.push(run);
-      return () => queue.splice(queue.indexOf(run), 1);
+    write: (h) => {
+      if (refuse) {
+        refused++;
+        throw new DOMException("Attempt to use history.replaceState() more than 100 times per 30 seconds", "SecurityError");
+      }
+      writes.push(h);
     },
+    schedule: (run, delay = 0) => {
+      queue.push(run);
+      delays.push(delay);
+      dues.push(clock + delay);
+      return () => {
+        const i = queue.indexOf(run);
+        if (i >= 0) queue.splice(i, 1), delays.splice(i, 1), dues.splice(i, 1);
+      };
+    },
+    now: () => clock,
     onBehind: () => behind++,
   });
   return {
     live,
     writes,
     queue,
+    delays,
     behind: () => behind,
+    refused: () => refused,
+    refuse: (on: boolean) => (refuse = on),
+    tick: (ms: number) => (clock += ms),
     set: (s: Song) => (current = s),
-    idle: () => queue.splice(0).forEach((run) => run()),
+    idle: () => {
+      clock += 1000;
+      delays.length = dues.length = 0;
+      queue.splice(0).forEach((run) => run());
+    },
+    /** Run the scheduled writes whose time has come, without moving the clock. */
+    runDue: () => {
+      const ready = queue.filter((_, i) => dues[i] <= clock);
+      for (const run of ready) {
+        const i = queue.indexOf(run);
+        queue.splice(i, 1), delays.splice(i, 1), dues.splice(i, 1);
+        run();
+      }
+    },
   };
 }
 
@@ -270,4 +308,94 @@ test("after a flush, the next edit queues a write again", () => {
   assert.equal(t.queue.length, 1);
   t.idle();
   assert.deepEqual(songFromHash(t.writes.at(-1)!), song(line(100), line(200), line(300)));
+});
+
+// --- a browser refusing the write (Safari: 100 per 30 s) -----------------------------
+// A refused write must never stop the edit: the page keeps going, and one write waits
+// for later so the address bar catches up once the browser allows it again.
+
+test("a writer that throws does not throw out of changed(), and a later flush writes the current song", () => {
+  const t = rig(song(line(100), line(200), line(300)));
+  t.live.start();
+  t.refuse(true);
+  t.set(song(line(100), line(200)));
+  assert.doesNotThrow(() => t.live.changed("undo"));
+  assert.equal(t.refused(), 1, "the undo tried to write at once");
+  assert.equal(t.queue.length, 1, "one write is kept for later");
+  t.set(song(line(100)));
+  assert.doesNotThrow(() => t.live.changed("undo"));
+  assert.equal(t.refused(), 1, "while refused, later edits wait instead of hammering the browser");
+  assert.equal(t.queue.length, 1, "still one pending write, not one per edit");
+
+  t.refuse(false);
+  t.live.flush();
+  assert.equal(t.writes.length, 1);
+  assert.deepEqual(songFromHash(t.writes[0]), song(line(100)), "the flush writes the song on screen now");
+  assert.equal(t.queue.length, 0);
+  t.set(song());
+  t.live.changed("clear");
+  assert.equal(t.writes.length, 2, "once the browser takes writes again, edits write at once again");
+});
+
+test("a refused write retries a while later, and keeps retrying until the browser takes it", () => {
+  const t = rig(song(line(100), line(200)));
+  t.live.start();
+  t.refuse(true);
+  t.set(song(line(100)));
+  t.live.changed("undo");
+  assert.ok(t.delays[0] >= 500, `the retry waits a while (${t.delays[0]} ms), not the next frame`);
+  t.idle();
+  assert.equal(t.refused(), 2, "the retry tried again");
+  assert.equal(t.queue.length, 1, "and, refused again, waits once more");
+  t.refuse(false);
+  t.idle();
+  assert.equal(t.writes.length, 1);
+  assert.deepEqual(songFromHash(t.writes[0]), song(line(100)));
+  assert.equal(t.queue.length, 0);
+});
+
+test("a flush that is refused keeps the write pending", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.set({ bpm: 120, strokes: [line(100)] });
+  t.live.changed("tempo-drag");
+  t.refuse(true);
+  assert.doesNotThrow(() => t.live.flush());
+  assert.equal(t.queue.length, 1);
+  t.refuse(false);
+  t.live.flush();
+  assert.deepEqual(songFromHash(t.writes.at(-1)!), { bpm: 120, strokes: [line(100)] });
+});
+
+// --- holding a key (auto-repeat) ---------------------------------------------------
+
+test("holding Ctrl+Z writes the first few undos at once, then falls back to a paced write", () => {
+  const strokes = Array.from({ length: 150 }, (_, i) => line(10 + i));
+  const t = rig(song(...strokes));
+  t.live.start();
+  for (let n = 149; n >= 0; n--) {
+    t.set(song(...strokes.slice(0, n)));
+    t.live.changed("undo");
+    t.tick(33); // key auto-repeat, ~30 per second
+    t.runDue(); // a paced write that comes due between repeats
+  }
+  const seconds = (150 * 33) / 1000;
+  assert.ok(t.writes.length >= 5, "the first undos still write at once");
+  assert.ok(t.writes.length <= 5 + seconds * 3 + 1, `${t.writes.length} writes in ${seconds} s: under Safari's 100 per 30 s pace`);
+  t.idle();
+  assert.deepEqual(songFromHash(t.writes.at(-1)!), song(), "the address bar ends on the song on screen");
+  assert.equal(t.queue.length, 0);
+});
+
+test("a single undo after a burst has calmed down writes at once again", () => {
+  const t = rig(song(line(100), line(200), line(300)));
+  t.live.start();
+  for (let i = 0; i < 20; i++) t.live.changed("stroke");
+  t.idle();
+  t.tick(5000);
+  const before = t.writes.length;
+  t.set(song(line(100), line(200)));
+  t.live.changed("undo");
+  assert.equal(t.writes.length, before + 1, "written synchronously");
+  assert.equal(t.queue.length, 0);
 });

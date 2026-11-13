@@ -922,6 +922,78 @@ async function liveLink(browser, name, viewport, phone) {
   await context.close();
 }
 
+// Browsers cap address-bar writes (Safari throws past 100 replaceState calls in 30 s). Holding
+// Ctrl+Z after Share must still undo everything, and the address bar catches up once allowed.
+async function heldUndo(browser, name, viewport) {
+  const ctxOptions = { viewport, colorScheme: "dark" };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const paper = () => page.evaluate(() => document.querySelector("#paper").toDataURL());
+  const empty = await paper();
+  const box = await page.locator("#canvas-wrap").boundingBox();
+  const strokes = 150;
+
+  await check(`${name} 150 strokes, shared`, async () => {
+    for (let i = 0; i < strokes; i++) {
+      const x = box.x + box.width * (0.04 + 0.08 * (i % 10));
+      const y = box.y + box.height * ((1 + (i % 13)) / 15);
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + box.width * 0.05, y + 4, { steps: 2 });
+      await page.mouse.up();
+    }
+    assert.equal((await hook.song(page)).strokes.length, strokes);
+    await page.locator("#share").click();
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+  });
+
+  await check(`${name} holding Ctrl+Z past the browser's write limit`, async () => {
+    // Safari's rule, with a 4 s window instead of 30 s: past 100 calls in the window, replaceState
+    // throws. All 100 are spent already, as if by earlier edits, so every write in the burst is refused.
+    await page.evaluate(() => {
+      const replace = history.replaceState.bind(history);
+      window.__refused = 0;
+      window.__calls = 100;
+      window.__windowStart = performance.now();
+      history.replaceState = (...args) => {
+        if (performance.now() - window.__windowStart > 4000) (window.__windowStart = performance.now()), (window.__calls = 0);
+        if (++window.__calls > 100) {
+          window.__refused++;
+          throw new DOMException("Attempt to use history.replaceState() more than 100 times per 30 seconds", "SecurityError");
+        }
+        return replace(...args);
+      };
+    });
+    const stale = await page.evaluate(() => location.hash);
+    const t0 = Date.now();
+    for (let i = 0; i < strokes; i++) await page.keyboard.press("Control+z");
+    const burst = Date.now() - t0;
+    assert.deepEqual(errors, [], "page errors during the burst");
+    assert.ok(burst < 3500, `the burst took ${burst} ms, longer than the simulated limit window`);
+    assert.equal(await page.evaluate(() => location.hash), stale, "a refused write should leave the address bar as it was");
+    assert.ok((await page.evaluate(() => window.__refused)) > 0, "the burst should have reached the limit (the check would prove nothing)");
+    assert.equal((await hook.song(page)).strokes.length, 0, "every undo should land");
+    assert.equal(await paper(), empty, "the canvas should be empty after undoing every stroke");
+    assert.equal(await page.locator("#undo").getAttribute("aria-disabled"), "true", "nothing left to undo");
+    assert.ok(await page.locator("#hint").isVisible(), "hint on the emptied canvas");
+    // Once the window passes, the address bar catches up to the empty song on screen.
+    await page
+      .waitForFunction((prev) => location.hash !== prev && location.hash.startsWith("#v1."), stale, { timeout: 8000, polling: 50 })
+      .catch(() => {
+        throw new Error("the address bar never caught up after the burst");
+      });
+    const want = await hook.song(page);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.deepEqual(await hook.song(page), want, "reload after the burst opened a different song");
+    assert.equal(want.strokes.length, 0);
+    assert.deepEqual(errors, [], "page errors after the burst");
+  });
+  await context.close();
+}
+
 // Broken links must open to an empty canvas, quietly.
 async function malformedLinks(browser) {
   const name = "bad links";
@@ -1142,6 +1214,7 @@ try {
   await emptyPlay(browser, "empty-play-phone", { width: 390, height: 844 }, true, false);
   await liveLink(browser, "live-desktop", { width: 1280, height: 900 }, false);
   await liveLink(browser, "live-phone", { width: 390, height: 844 }, true);
+  await heldUndo(browser, "held-undo-desktop", { width: 1280, height: 900 });
   await toastLayout(browser, "toast-phone-light", { width: 390, height: 844 }, "light", true, { short: 2, long: 3 });
   await toastLayout(browser, "toast-phone-dark", { width: 390, height: 844 }, "dark", true, { short: 2, long: 3 });
   await toastLayout(browser, "toast-desktop-dark", { width: 1280, height: 900 }, "dark", false, { short: 1, long: 1 });

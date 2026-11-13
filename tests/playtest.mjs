@@ -1483,6 +1483,25 @@ async function likesLayout(browser, name, viewport, phone, total = 12) {
   console.log(`${name}: dock ${seen.ok.dock.height}px tall with or without the heart, canvas ${seen.ok.canvas.width}x${seen.ok.canvas.height}`);
 }
 
+// Both sliders have a name in the accessibility tree at every size (lab#21): the Tempo
+// label holds an <output>, so it is tied to the slider with for="tempo".
+async function sliderNames(browser, name, viewport, phone) {
+  const ctxOptions = phone ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  await check(`${name} both sliders are named`, async () => {
+    const tempo = page.getByRole("slider", { name: /tempo/i });
+    assert.equal(await tempo.count(), 1, "no slider named Tempo");
+    assert.equal(await tempo.getAttribute("id"), "tempo");
+    assert.equal(await page.getByRole("slider", { name: /brush/i }).getAttribute("id"), "size", "no slider named Brush");
+    assert.equal(await tempo.getAttribute("aria-valuetext"), "90 bpm");
+    await tempo.fill("110");
+    assert.equal(await tempo.getAttribute("aria-valuetext"), "110 bpm", "aria-valuetext should follow the tempo");
+    console.log(`${name}: slider names ${JSON.stringify(await page.locator(".sliders").ariaSnapshot())}`);
+  });
+  await context.close();
+}
+
 // A phone held sideways: the dock moves beside the canvas, so with or without the heart the page
 // doesn't scroll, every control is on screen and big enough to tap, and the canvas keeps its height.
 async function landscape(browser, name, viewport) {
@@ -1594,6 +1613,9 @@ try {
   await likesLayout(browser, "likes-layout-desktop", { width: 1280, height: 900 }, false);
   await landscape(browser, "landscape-phone", { width: 844, height: 390 });
   await landscape(browser, "landscape-small-phone", { width: 667, height: 375 });
+  await sliderNames(browser, "slider-names-phone", { width: 390, height: 844 }, true);
+  await sliderNames(browser, "slider-names-landscape", { width: 844, height: 390 }, true);
+  await sliderNames(browser, "slider-names-desktop", { width: 1280, height: 900 }, false);
   for (const mode of ["resting", "down", "slow"]) await likesQuiet(browser, mode);
 } finally {
   await browser.close();

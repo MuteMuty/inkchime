@@ -21,18 +21,24 @@
     </header>
 
     <main class="stage">
-      <div id="canvas-wrap" class="canvas-wrap" role="img" aria-label="Drawing canvas. Draw with a mouse, finger or pen. Height is pitch, thickness is volume, colour is the instrument.">
+      <!-- A keyboard target: Tab reaches it, arrow keys move the cursor, Enter or N places a note (see core/keypen.ts).
+           Screen readers hear its name and the description below; the visible hint repeats it, so it is hidden from them. -->
+      <div id="canvas-wrap" class="canvas-wrap" tabindex="0" role="application" aria-label="Drawing canvas" aria-describedby="canvas-help">
         <canvas id="paper" class="layer"></canvas>
         <canvas id="live" class="layer"></canvas>
         <canvas id="fx" class="layer"></canvas>
         <div id="playhead" class="playhead" aria-hidden="true"></div>
-        <div id="hint" class="hint">
+        <div id="cursor" class="cursor" aria-hidden="true"></div>
+        <div id="hint" class="hint" aria-hidden="true">
           <p class="hint-main">Draw a line, then press play.</p>
           <p class="hint-sub">Height is pitch. Thickness is volume. Colour is the instrument.</p>
-          <p class="hint-keys">Space plays and pauses. Ctrl or ⌘ Z undoes.</p>
+          <p class="hint-keys">Space plays and pauses. Ctrl or ⌘ Z undoes. Or Tab to the canvas and place notes with the arrows and Enter.</p>
         </div>
       </div>
-      <!-- Outside the canvas (its role="img" hides its children from screen readers), so this is announced.
+      <p id="canvas-help" hidden>Draw with a mouse, finger or pen, or move a cursor over the grid with the arrow keys and press Enter or N to place a note. Left to right is time, height is pitch, the brush sets the volume and the colour is the instrument. Space plays and pauses. Ctrl or ⌘ Z undoes.</p>
+      <!-- Says what the keyboard cursor is on and what was placed. -->
+      <p id="say" class="sr-only" aria-live="polite"></p>
+      <!-- Outside the canvas, so it is announced as a status and not mixed into the canvas.
            Filled after load when the page opens from a song link; see core/invite.ts. -->
       <div id="invite" class="invite" role="status"></div>
     </main>

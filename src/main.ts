@@ -1,11 +1,12 @@
 import "./style.css";
-import { BPM_DEFAULT, BPM_MAX, BPM_MIN, GRID, canAddStroke, SIZE_DEFAULT, VOICE_COUNT, VOICE_NAMES, type Note, type Song, type Stroke } from "./core/model.ts";
+import { BPM_DEFAULT, BPM_MAX, BPM_MIN, COLS, GRID, ROWS, canAddStroke, SIZE_DEFAULT, VOICE_COUNT, VOICE_NAMES, type Note, type Song, type Stroke } from "./core/model.ts";
 import { History } from "./core/history.ts";
 import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
 import { prepareShare, songFromHash } from "./core/share.ts";
 import { LiveLink, type Schedule } from "./core/livelink.ts";
 import { PlayInvite } from "./core/invite.ts";
+import { CURSOR_START, cursorStroke, describeCursor, describeNote, moveCursor } from "./core/keypen.ts";
 import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { Player, type NoteEvent } from "./audio/player.ts";
@@ -76,16 +77,34 @@ function preview(yFraction: number): void {
   if (degree === previewDegree || now - previewAt < 70) return;
   previewDegree = degree;
   previewAt = now;
+  sound(degree);
+}
+/** One short note now, in the current colour and size. */
+function sound(degree: number): void {
   const ctx = engine.unlock();
   engine.note(color, degreeToMidi(degree), sizeToGain(size) * 0.7, ctx.currentTime + 0.005, stepSeconds(bpm));
 }
 
-const stage = new Stage($("#canvas-wrap"), {
-  canStart() {
-    if (canAddStroke(edits.value.length)) return true;
-    toast("That's the most this song can hold. Undo or clear to draw more.");
-    return false;
-  },
+/** Is there room for one more stroke? If not, say so. */
+function roomForStroke(): boolean {
+  if (canAddStroke(edits.value.length)) return true;
+  toast("That's the most this song can hold. Undo or clear to draw more.");
+  return false;
+}
+
+/** Add a finished stroke as one edit that can be undone: at pen-up, or a note placed with the keys. */
+function commitStroke(stroke: Stroke): void {
+  edits.set([...edits.value, stroke]);
+  songChanged();
+  stage.addStroke(stroke);
+  // Written at once: a reload starts from the address it was given,
+  // so a write still waiting for idle (or for pagehide) would lose this stroke.
+  live.flush();
+}
+
+const wrap = $("#canvas-wrap");
+const stage = new Stage(wrap, {
+  canStart: roomForStroke,
   onStart(_x, y) {
     previewDegree = -1;
     $("#hint").classList.add("gone");
@@ -96,15 +115,60 @@ const stage = new Stage($("#canvas-wrap"), {
   onEnd(raw) {
     const pts = normalizePoints(raw);
     if (!pts.length || !canAddStroke(edits.value.length)) return;
-    const stroke: Stroke = { color, size, pts };
-    edits.set([...edits.value, stroke]);
-    songChanged();
-    stage.addStroke(stroke);
-    // Pen-up writes the link at once: a reload starts from the address it was given,
-    // so a write still waiting for idle (or for pagehide) would lose this stroke.
-    live.flush();
+    commitStroke({ color, size, pts });
   },
 });
+
+// --- drawing with keys -------------------------------------------------------------
+// Tab reaches the canvas. Arrow keys move a cursor over the grid, Enter or N places a
+// short note in that cell (see core/keypen.ts), and a polite live region reads it out.
+
+const cursorEl = $("#cursor");
+const say = $("#say");
+let cursor = CURSOR_START;
+
+function showCursor(): void {
+  cursorEl.style.left = `${(cursor.col * 100) / COLS}%`;
+  cursorEl.style.top = `${(cursor.row * 100) / ROWS}%`;
+  cursorEl.style.width = `${100 / COLS}%`;
+  cursorEl.style.height = `${100 / ROWS}%`;
+}
+
+/** Read out in the polite live region. The same words twice (the same note again) still change the text, so they are read again. */
+function speak(text: string): void {
+  say.textContent = say.textContent === text ? `${text}\u00a0` : text;
+}
+
+function placeNote(): void {
+  if (!roomForStroke()) return;
+  endInvite();
+  commitStroke(cursorStroke(cursor, color, size));
+  sound(ROWS - 1 - cursor.row);
+  speak(describeNote(cursor, color));
+}
+
+wrap.addEventListener("keydown", (e) => {
+  // Ctrl or ⌘ Z, Space and Tab are left to the page; nothing here while a pen is down.
+  if (e.ctrlKey || e.metaKey || e.altKey || stage.drawing) return;
+  const next = moveCursor(cursor, e.key);
+  const place = e.key === "Enter" || e.key === "n" || e.key === "N";
+  if (!next && !place) return;
+  e.preventDefault();
+  // Show the cursor, even if the canvas was focused or last used with a pointer.
+  wrap.classList.add("keys");
+  wrap.classList.remove("pointer");
+  if (next) {
+    cursor = next;
+    showCursor();
+    speak(describeCursor(cursor));
+  } else if (!e.repeat) placeNote();
+});
+// Drawing with a pointer hides the cursor until the next key; leaving the canvas forgets both.
+wrap.addEventListener("pointerdown", () => {
+  wrap.classList.remove("keys");
+  wrap.classList.add("pointer");
+});
+wrap.addEventListener("blur", () => wrap.classList.remove("keys", "pointer"));
 
 // --- keeping everything in step ---------------------------------------------------
 
@@ -317,6 +381,7 @@ if (fromLink && wasShared()) {
   live.start();
 }
 stage.setPlayhead(0);
+showCursor();
 // Filled a moment after load, so screen readers notice the status region change and read it.
 if (invite.showing) requestAnimationFrame(() => invite.showing && showInvite());
 
@@ -341,6 +406,7 @@ Object.defineProperty(window, "__inkchime", {
       time: engine.ctx?.currentTime ?? 0,
       position: player.position(),
       hash: location.hash,
+      cursor: { ...cursor },
     }),
   }),
 });

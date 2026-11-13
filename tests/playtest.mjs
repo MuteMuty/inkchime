@@ -89,6 +89,21 @@ const setSize = (page, v) => page.locator("#size").fill(String(v));
 const setTempo = (page, v) => page.locator("#tempo").fill(String(v));
 const toastShown = (page) => page.locator("#toast").evaluate((el) => el.classList.contains("show"));
 const press = (page, how, sel) => (how === "tap" ? page.locator(sel).tap() : page.locator(sel).click());
+/** The "press play" invite a song link opens with (filled a frame after load). */
+const invitePill = (page) => page.locator("#invite .invite-pill");
+const inviteShown = (page) => invitePill(page).waitFor({ state: "visible", timeout: 2000 }).then(() => true, () => false);
+/** No invite now, and none still to come: it is filled a frame after load, so give it a moment first. */
+async function noInvite(page, why) {
+  await page.waitForTimeout(150);
+  assert.equal(await invitePill(page).isVisible(), false, `the play invite shows ${why}`);
+  assert.equal(await page.locator("#play").getAttribute("aria-describedby"), null, `Play is described by the invite ${why}`);
+}
+const inviteGone = (page, after) =>
+  invitePill(page)
+    .waitFor({ state: "hidden", timeout: 2000 })
+    .catch(() => {
+      throw new Error(`the play invite is still showing after ${after}`);
+    });
 
 async function noHorizontalOverflow(page, name, when) {
   const r = await page.evaluate(() => ({
@@ -186,6 +201,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
     const names = await page.locator(".voice .name").allInnerTexts();
     assert.ok(new Set(names).size === names.length && names.length >= 3, "each colour should name a different instrument");
     assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab$/);
+    await noInvite(page, "on a normal visit");
   });
   await noHorizontalOverflow(page, name, "empty");
   await page.screenshot({ path: join(out, `${name}-empty.png`) });
@@ -389,6 +405,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
       await fresh.page.screenshot({ path: join(out, `${name}-opened-link.png`) });
       await check(`${name} link plays the same notes`, async () => {
         await fresh.page.keyboard.press("Space");
+        await inviteGone(fresh.page, "Space started the song");
         assert.equal(await toastShown(fresh.page), false, "no toast when a shared song plays");
         await allNotesScheduled(fresh.page);
         const state = await hook.state(fresh.page);
@@ -406,7 +423,100 @@ async function session(browser, name, viewport, colorScheme, phone) {
   await page.waitForTimeout(200);
   await page.screenshot({ path: join(out, `${name.replace(colorScheme, other)}-drawn.png`) });
 
+  // A second link: one more line, which the address bar follows now that Share was pressed.
+  let otherUrl = "";
+  if (shareUrl) {
+    await drawLine(page, 0.5, 0.8, rowCentre(6));
+    await page.waitForFunction((prev) => location.href !== prev && location.hash.startsWith("#v1."), shareUrl, { timeout: 3000 }).catch(() => {});
+    otherUrl = page.url();
+    await playInvite(browser, name, ctxOptions, colorScheme, tapOrClick, shareUrl, otherUrl);
+  }
+
   await context.close();
+}
+
+// Someone opens a song link: browsers can't autoplay, so the page says it is a song and to press Play.
+// The invite goes on the first Play, the first stroke, or another song opened in the tab, and stays gone.
+async function playInvite(browser, name, ctxOptions, colorScheme, tapOrClick, shareUrl, otherUrl) {
+  const open = async (what) => {
+    const fresh = await openPage(browser, `${name} (${what})`, ctxOptions, shareUrl);
+    if (!fresh.ok) await fresh.context.close();
+    return fresh.ok ? fresh : null;
+  };
+
+  let fresh = await open("invite");
+  if (fresh) {
+    const { page } = fresh;
+    await check(`${name} a shared link invites Play`, async () => {
+      assert.ok(await inviteShown(page), "no play invite on a page opened from a song link");
+      assert.equal(await invitePill(page).innerText(), "Someone sent you a song. Press play to hear it.");
+      assert.equal(await page.locator("#invite").getAttribute("role"), "status", "the invite should be announced");
+      assert.equal(await page.locator("#invite").evaluate((el) => !!el.closest("[role=img]")), false, "inside role=img, so screen readers skip it");
+      assert.equal(await page.locator("#play").getAttribute("aria-describedby"), "invite");
+      // Over the canvas, inside the screen, on one or two lines.
+      const pill = await invitePill(page).boundingBox();
+      const canvas = await page.locator("#canvas-wrap").boundingBox();
+      const vw = page.viewportSize().width;
+      assert.ok(pill.x >= canvas.x && pill.x + pill.width <= canvas.x + canvas.width + 0.5, "the invite sticks out of the canvas sideways");
+      assert.ok(pill.y >= canvas.y && pill.y + pill.height <= canvas.y + canvas.height + 0.5, "the invite sticks out of the canvas");
+      assert.ok(pill.x >= 16 && pill.x + pill.width <= vw - 16, "the invite is not inside the 16px gutters");
+      assert.ok(pill.height < 80, `the invite is ${pill.height}px tall`);
+      // The hint for an empty canvas stays out of the way.
+      assert.equal(await page.locator("#hint").evaluate((el) => el.classList.contains("gone")), true);
+      // Play pulses, unless motion is reduced.
+      assert.equal(await page.locator("#play").evaluate((el) => getComputedStyle(el).animationName), "invite-ring");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      assert.equal(await page.locator("#play").evaluate((el) => getComputedStyle(el).animationName), "none", "the pulse ignores reduced motion");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+    });
+    await noHorizontalOverflow(page, `${name} (invite)`, "invited");
+    await page.screenshot({ path: join(out, `${name}-invite.png`) });
+    const other = colorScheme === "dark" ? "light" : "dark";
+    await page.emulateMedia({ colorScheme: other });
+    await page.waitForTimeout(100);
+    await page.screenshot({ path: join(out, `${name.replace(colorScheme, other)}-invite.png`) });
+    await page.emulateMedia({ colorScheme });
+
+    await check(`${name} pressing Play ends the invite for good`, async () => {
+      await press(page, tapOrClick, "#play");
+      await inviteGone(page, "pressing Play");
+      assert.equal((await hook.state(page)).playing, true);
+      assert.equal(await page.locator("#play").getAttribute("aria-describedby"), null, "Play is still described by the invite");
+      assert.equal(await page.locator("#play").evaluate((el) => getComputedStyle(el).animationName), "none", "Play still pulses");
+      await press(page, tapOrClick, "#play"); // pause: it stays gone
+      await page.waitForTimeout(350);
+      assert.equal(await invitePill(page).isVisible(), false, "the invite came back after pausing");
+    });
+    await page.screenshot({ path: join(out, `${name}-invite-played.png`) });
+    await fresh.context.close();
+  }
+
+  fresh = await open("invite, then draw");
+  if (fresh) {
+    const { page } = fresh;
+    await check(`${name} drawing ends the invite for good`, async () => {
+      assert.ok(await inviteShown(page), "no play invite on a page opened from a song link");
+      await drawLine(page, 0.1, 0.3, rowCentre(12));
+      await inviteGone(page, "drawing a line");
+      await page.keyboard.press("Control+z"); // back to the song as it was sent: still gone
+      await page.waitForTimeout(350);
+      assert.equal(await invitePill(page).isVisible(), false, "the invite came back after undo");
+    });
+    await fresh.context.close();
+  }
+
+  fresh = otherUrl && otherUrl !== shareUrl ? await open("invite, then another song") : null;
+  if (fresh) {
+    const { page } = fresh;
+    await check(`${name} opening another song in the tab ends the invite`, async () => {
+      assert.ok(await inviteShown(page), "no play invite on a page opened from a song link");
+      const before = (await hook.song(page)).strokes.length;
+      await page.evaluate((h) => (location.hash = h), new URL(otherUrl).hash);
+      await page.waitForFunction((n) => window.__inkchime.song().strokes.length === n + 1, before, { timeout: 3000 });
+      await inviteGone(page, "a hashchange opened another song");
+    });
+    await fresh.context.close();
+  }
 }
 
 // A full song: the 401st stroke is blocked with a toast, and Share on the 400 gives a link that opens identically.
@@ -591,6 +701,7 @@ async function liveLink(browser, name, viewport, phone) {
     assert.deepEqual(await hook.schedule(page), want.schedule, `reload after ${what} gave a different note schedule`);
     assert.equal(await page.locator("#tempo").inputValue(), String(want.song.bpm), `tempo control after ${what}`);
     assert.equal(await page.evaluate(() => history.length), historyLength, `${what} added a browser-history entry`);
+    await noInvite(page, `when the author reloads their own link (after ${what})`);
   };
   /** Make an edit after Share, wait for the link to follow, then reload (a reload forgets the undo history). */
   const step = async (what, edit, reload = true) => {
@@ -617,6 +728,7 @@ async function liveLink(browser, name, viewport, phone) {
   });
 
   let shared = "";
+  let emptyLink = "";
   await check(`${name} share, then the link follows every edit`, async () => {
     await press(page, phone ? "tap" : "click", "#share");
     await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
@@ -640,6 +752,7 @@ async function liveLink(browser, name, viewport, phone) {
     await step("clear", () => page.locator("#clear").click());
     assert.equal((await hook.song(page)).strokes.length, 0, "clear should reload to an empty canvas");
     assert.ok(await page.locator("#hint").isVisible(), "hint after reloading a cleared song");
+    emptyLink = page.url();
     await step("drawing after clear", async () => {
       await pickColour(page, "Bell");
       await setSize(page, 5);
@@ -684,6 +797,19 @@ async function liveLink(browser, name, viewport, phone) {
     assert.equal(await page.evaluate(() => history.length), historyLength, "the pen-up write added a browser-history entry");
   });
 
+  // A link to an empty canvas (after Clear) has nothing to play: the usual hint, no invite.
+  if (emptyLink) {
+    const fresh = await openPage(browser, `${name} (empty link)`, ctxOptions, emptyLink);
+    if (fresh.ok) {
+      await check(`${name} an empty-canvas link has no invite`, async () => {
+        assert.equal((await hook.song(fresh.page)).strokes.length, 0);
+        assert.ok(await fresh.page.locator("#hint").isVisible(), "hint on an empty-canvas link");
+        await noInvite(fresh.page, "for a link to an empty canvas");
+      });
+    }
+    await fresh.context.close();
+  }
+
   await check(`${name} Back leaves the page`, async () => {
     await page.goBack({ waitUntil: "commit" });
     assert.ok(!page.url().startsWith(base), `Back stayed on the page: ${page.url()}`);
@@ -710,6 +836,7 @@ async function malformedLinks(browser) {
       await check(`${name} ${hash.slice(0, 24)}`, async () => {
         assert.equal((await hook.song(page)).strokes.length, 0, "should be an empty canvas");
         assert.ok(await page.locator("#hint").isVisible());
+        await noInvite(page, "for a broken link");
         await drawLine(page, 0.2, 0.4, 0.5); // and it still works
         assert.equal((await hook.song(page)).strokes.length, 1);
       });

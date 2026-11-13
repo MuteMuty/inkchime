@@ -32,6 +32,9 @@
           <p class="hint-keys">Space plays and pauses. Ctrl or ⌘ Z undoes.</p>
         </div>
       </div>
+      <!-- Outside the canvas (its role="img" hides its children from screen readers), so this is announced.
+           Filled after load when the page opens from a song link; see core/invite.ts. -->
+      <div id="invite" class="invite" role="status"></div>
     </main>
 
     <section class="dock" aria-label="Tools">

@@ -11,7 +11,7 @@ Draw on the canvas with a mouse, finger or pen. A playhead sweeps left to right,
 | **Thickness** | the volume |
 | **Left to right** | the time: the loop is 32 columns across, and a note starts in the column you drew it in |
 
-A vertical scribble is a chord: a column plays at most three notes (the lowest, middle and highest the line touches). **Share** copies a link that holds the whole song (strokes, colours, sizes and tempo) in the URL hash. From then on the address bar follows the song as you keep drawing, undoing, clearing or changing the tempo, so a reload always opens what is on screen. Nothing is stored on a server, and there is no tracking.
+A vertical scribble is a chord: a column plays at most three notes (the lowest, middle and highest the line touches). **Share** copies a link that holds the whole song (strokes, colours, sizes and tempo) in the URL hash. From then on the address bar follows the song as you keep drawing, undoing, clearing or changing the tempo, so a reload always opens what is on screen. Someone who opens a song link sees "Someone sent you a song. Press play to hear it." (browsers can't autoplay) until they press Play, draw, or open another song. Nothing is stored on a server, and there is no tracking.
 
 Keys: **Space** plays and pauses (on a focused button it presses that button instead), **Ctrl or ⌘ Z** undoes. Every control is reachable with Tab.
 
@@ -19,7 +19,7 @@ Keys: **Space** plays and pauses (on a focused button it presses that button ins
 
 | Part | What it does |
 |---|---|
-| `src/core/` | Pure TypeScript with no browser APIs, all unit-tested: `pitch.ts` (height to scale degree, thickness to gain), `stroke.ts` (quantise and simplify a stroke), `notes.ts` (strokes to notes), `share.ts` (the link format), `livelink.ts` (keeping the address bar in step after Share), `scheduler.ts` (the lookahead logic), `history.ts` (undo). |
+| `src/core/` | Pure TypeScript with no browser APIs, all unit-tested: `pitch.ts` (height to scale degree, thickness to gain), `stroke.ts` (quantise and simplify a stroke), `notes.ts` (strokes to notes), `share.ts` (the link format), `livelink.ts` (keeping the address bar in step after Share), `invite.ts` (when a song link invites Play), `scheduler.ts` (the lookahead logic), `history.ts` (undo). |
 | `src/audio/` | `voices.ts` (the four instruments), `engine.ts` (the AudioContext, resumed on the first gesture), `player.ts` (a 25 ms timer that schedules the next 120 ms of notes at exact audio-clock times, so timer jitter never reaches the sound). |
 | `src/ui/stage.ts` | Plain Canvas 2D in three layers: committed strokes (redrawn only when the song changes), the stroke being drawn (one small curve added per pointer event), and the rings that bloom as notes sound. The playhead is an element moved with a transform. |
 | `index.html`, `src/style.css` | One page, light and dark from the system. The voice colours are defined once in CSS and the canvas reads them back. |
@@ -54,6 +54,6 @@ node tests/playtest.mjs http://localhost:4173
 # PLAYTEST_OUT      screenshot folder (default: ./playtest-out)
 ```
 
-It checks, at 1280 by 900 and 390 by 844: a drawn stroke is added; pressing play schedules its notes at the right times, with pitch from height and gain from thickness; the first sound comes within about 100 ms of the press; Space, Ctrl or ⌘ Z and the Tab order work; Share, then opening the link in a fresh page, gives the same strokes and the same note schedule; before Share the address bar is left alone, and after it every stroke, undo, tempo change and clear is followed, so a reload gives the same song, even one a few milliseconds after pen-up, with no new history entry and no dropped frames while drawing; broken links open an empty canvas; nothing overflows sideways; and the console stays free of errors.
+It checks, at 1280 by 900 and 390 by 844: a drawn stroke is added; pressing play schedules its notes at the right times, with pitch from height and gain from thickness; the first sound comes within about 100 ms of the press; Space, Ctrl or ⌘ Z and the Tab order work; Share, then opening the link in a fresh page, gives the same strokes and the same note schedule, with an invite to press Play that Play, drawing or another song ends (and that a normal visit, a broken link, an empty-canvas link or the author's own reload never shows); before Share the address bar is left alone, and after it every stroke, undo, tempo change and clear is followed, so a reload gives the same song, even one a few milliseconds after pen-up, with no new history entry and no dropped frames while drawing; broken links open an empty canvas; nothing overflows sideways; and the console stays free of errors.
 
 Made by [Erik Pahor](https://github.com/MuteMuty) at [BrightLoop Lab](https://lab.brightloopapps.com).

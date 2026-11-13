@@ -1,5 +1,5 @@
 // Inkchime playtest: draws, plays, shares and reopens songs in a real browser, at
-// desktop-dark (1280x900) and phone-light (390x844) sizes.
+// desktop-dark (1280x900) and phone-light (390x844) sizes, and a phone held sideways (844x390, 667x375).
 //
 // Headless browsers can't be heard, so sound is checked through the read-only
 // hook the page exposes, `window.__inkchime`: it lists every note handed to
@@ -1483,6 +1483,52 @@ async function likesLayout(browser, name, viewport, phone, total = 12) {
   console.log(`${name}: dock ${seen.ok.dock.height}px tall with or without the heart, canvas ${seen.ok.canvas.width}x${seen.ok.canvas.height}`);
 }
 
+// A phone held sideways: the dock moves beside the canvas, so with or without the heart the page
+// doesn't scroll, every control is on screen and big enough to tap, and the canvas keeps its height.
+async function landscape(browser, name, viewport) {
+  const ctxOptions = { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 };
+  const seen = {};
+  for (const mode of ["resting", "ok"]) {
+    const { page, context, ok } = await openPage(browser, `${name} (${mode})`, ctxOptions, base, { likes: { mode } });
+    if (!ok) return context.close();
+    if (mode === "ok") await page.locator("#like").waitFor({ state: "visible", timeout: 3000 }).catch(() => fail(`${name}: no heart`));
+    else await page.waitForTimeout(200);
+    await page.screenshot({ path: join(out, `${name}-${mode === "ok" ? "heart" : "no-heart"}.png`) });
+    await check(`${name} (${mode}) fits without scrolling`, async () => {
+      const m = await page.evaluate(() => {
+        const box = (el) => {
+          const b = el.getBoundingClientRect();
+          return { what: el.id || el.className || el.tagName, top: b.top, bottom: b.bottom, left: b.left, right: b.right, width: b.width, height: b.height };
+        };
+        const controls = [...document.querySelectorAll("#canvas-wrap, .chip, .dock button, .dock input[type=range], .foot a")]
+          .filter((el) => !el.closest("[hidden]"))
+          .map(box);
+        return { scroll: document.documentElement.scrollHeight, view: window.innerHeight, controls, canvas: box(document.querySelector("#canvas-wrap")) };
+      });
+      assert.ok(m.scroll <= m.view, `the page is ${m.scroll}px tall in a ${m.view}px window`);
+      const off = m.controls.filter((c) => c.top < -0.5 || c.left < -0.5 || c.bottom > m.view + 0.5 || c.right > viewport.width + 0.5);
+      assert.deepEqual(off.map((c) => c.what), [], "controls off the screen");
+      const small = m.controls.filter((c) => /chip|^(play|undo|clear|share|like)$/.test(c.what) && (c.height < 44 || c.width < 44));
+      assert.deepEqual(small.map((c) => `${c.what} ${c.width}x${c.height}`), [], "touch targets under 44px");
+      assert.ok(m.canvas.height >= 200, `the canvas is only ${m.canvas.height}px tall`);
+      seen[mode] = m.canvas;
+    });
+    await noHorizontalOverflow(page, name, mode === "ok" ? "with the heart" : "without the heart");
+    if (mode === "ok") {
+      await check(`${name} heart shows and draws`, async () => {
+        assert.equal(await page.locator("#like").isVisible(), true, "the heart should show");
+        await drawLine(page, 0.2, 0.6, rowCentre(5));
+        assert.equal((await hook.song(page)).strokes.length, 1, "a line drawn sideways should be added");
+      });
+    }
+    await context.close();
+  }
+  await check(`${name} the heart leaves the canvas alone`, async () => {
+    assert.deepEqual(seen.ok, seen.resting, "the heart moved or resized the canvas");
+  });
+  console.log(`${name}: canvas ${Math.round(seen.ok?.width)}x${Math.round(seen.ok?.height)}, no scrolling with or without the heart`);
+}
+
 // The live hub until its migration (resting: 204 to a quiet GET), unreachable, and slow:
 // the canvas draws and plays at once, the heart never shows, and nothing errors.
 async function likesQuiet(browser, mode) {
@@ -1546,6 +1592,8 @@ try {
   await likesLayout(browser, "likes-layout-phone", { width: 390, height: 844 }, true);
   await likesLayout(browser, "likes-layout-small-phone", { width: 320, height: 640 }, true, 1999);
   await likesLayout(browser, "likes-layout-desktop", { width: 1280, height: 900 }, false);
+  await landscape(browser, "landscape-phone", { width: 844, height: 390 });
+  await landscape(browser, "landscape-small-phone", { width: 667, height: 375 });
   for (const mode of ["resting", "down", "slow"]) await likesQuiet(browser, mode);
 } finally {
   await browser.close();

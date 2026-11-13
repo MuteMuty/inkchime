@@ -258,6 +258,7 @@ button.primary:hover { border-color: var(--ink); opacity: 0.9; }
   line-height: 1.2;
 }
 .slider output { color: var(--ink); font-variant-numeric: tabular-nums; }
+.slider-note { display: inline-flex; align-items: center; white-space: nowrap; }
 .brush-dot {
   display: inline-block;
   width: 10px;

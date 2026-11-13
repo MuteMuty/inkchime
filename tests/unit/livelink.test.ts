@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LiveLink, linkFor } from "../../src/core/livelink.ts";
+import { LiveLink, linkFor, writesAtOnce, type Edit } from "../../src/core/livelink.ts";
 import { prepareShare, songFromHash } from "../../src/core/share.ts";
 import { GRID, MAX_STROKES, type Song, type Stroke } from "../../src/core/model.ts";
 
@@ -74,7 +74,7 @@ function rig(start: Song) {
 test("before Share, edits never touch the link", () => {
   const t = rig(song(line(100)));
   t.set(song(line(100), line(200)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.live.active, false);
   assert.equal(t.queue.length, 0);
@@ -85,54 +85,140 @@ test("after Share, each edit rewrites the link with the current song", () => {
   const t = rig(song(line(100)));
   t.live.start();
   assert.equal(t.live.active, true);
-  const steps = [song(line(100), line(200)), song(line(100)), song(), song(line(300, 2, 8))]; // add, undo, clear, draw again
-  for (const s of steps) {
+  const steps: [Edit, Song][] = [
+    ["stroke", song(line(100), line(200))],
+    ["undo", song(line(100))],
+    ["clear", song()],
+    ["stroke", song(line(300, 2, 8))],
+    ["tempo-drag", { bpm: 120, strokes: [line(300, 2, 8)] }],
+  ];
+  for (const [edit, s] of steps) {
     t.set(s);
-    t.live.changed();
+    t.live.changed(edit);
     t.idle();
     assert.deepEqual(songFromHash(t.writes.at(-1)!), s);
   }
   assert.equal(t.writes.length, steps.length);
 });
 
-test("a burst of edits is written once, when idle, with the latest song", () => {
+test("dragging the tempo slider is written once per idle moment, with the latest tempo", () => {
   const t = rig(song(line(100)));
   t.live.start();
-  for (let i = 0; i < 5; i++) {
-    t.set(song(line(100), line(200 + i)));
-    t.live.changed();
+  for (let bpm = 80; bpm <= 100; bpm++) {
+    t.set({ bpm, strokes: [line(100)] });
+    t.live.changed("tempo-drag");
   }
-  assert.equal(t.queue.length, 1, "one pending write, not one per edit");
+  assert.equal(t.queue.length, 1, "one pending write, not one per input event");
   assert.deepEqual(t.writes, [], "nothing is encoded until idle");
   t.idle();
   assert.equal(t.writes.length, 1);
-  assert.deepEqual(songFromHash(t.writes[0]), song(line(100), line(204)));
+  assert.deepEqual(songFromHash(t.writes[0]), { bpm: 100, strokes: [line(100)] });
+  t.set({ bpm: 101, strokes: [line(100)] });
+  t.live.changed("tempo-drag");
+  assert.equal(t.queue.length, 1, "the next idle moment gets the next write");
+  t.idle();
+  assert.equal(t.writes.length, 2);
+});
+
+// --- which edits are written at once ----------------------------------------------
+// A reload starts from the address it was given (in Chromium, before pagehide runs),
+// so any edit that is not part of a drag must be in the address bar the moment it lands.
+
+test("writesAtOnce: every discrete edit writes at once; only a tempo drag waits for idle", () => {
+  const atOnce: Edit[] = ["stroke", "undo", "clear", "tempo", "open"];
+  for (const edit of atOnce) assert.equal(writesAtOnce(edit), true, edit);
+  assert.equal(writesAtOnce("tempo-drag"), false);
+});
+
+for (const [edit, after] of [
+  ["stroke", song(line(100), line(200), line(300))], // pen-up, or a note placed with the keys
+  ["undo", song(line(100))],
+  ["clear", song()],
+  ["tempo", { bpm: 112, strokes: [line(100), line(200)] }], // the slider let go (change)
+  ["open", song(line(700, 3, 2))],
+] as [Edit, Song][]) {
+  test(`after Share, ${edit} is in the address bar before anything else runs, with no idle wait`, () => {
+    const t = rig(song(line(100), line(200)));
+    t.live.start();
+    t.set(after);
+    t.live.changed(edit);
+    assert.equal(t.writes.length, 1, "written synchronously");
+    assert.deepEqual(songFromHash(t.writes[0]), after);
+    assert.equal(t.queue.length, 0, "nothing left waiting for idle");
+  });
+
+  test(`before Share, ${edit} touches nothing`, () => {
+    const t = rig(song(line(100), line(200)));
+    t.set(after);
+    t.live.changed(edit);
+    t.live.flush();
+    t.idle();
+    assert.deepEqual(t.writes, []);
+    assert.equal(t.queue.length, 0);
+  });
+}
+
+test("letting go of the tempo slider writes the final tempo at once and cancels the idle write", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  for (const bpm of [90, 95, 99]) {
+    t.set({ bpm, strokes: [line(100)] });
+    t.live.changed("tempo-drag");
+  }
+  t.live.changed("tempo");
+  assert.equal(t.writes.length, 1);
+  assert.equal(songFromHash(t.writes[0])?.bpm, 99);
+  assert.equal(t.queue.length, 0, "the drag's pending write is cancelled");
+  t.idle();
+  assert.equal(t.writes.length, 1, "and not written twice");
+});
+
+test("an undo during a tempo drag writes both at once and leaves nothing queued", () => {
+  const t = rig(song(line(100), line(200)));
+  t.live.start();
+  t.set({ bpm: 110, strokes: [line(100), line(200)] });
+  t.live.changed("tempo-drag");
+  t.set({ bpm: 110, strokes: [line(100)] });
+  t.live.changed("undo");
+  assert.equal(t.writes.length, 1);
+  assert.deepEqual(songFromHash(t.writes[0]), { bpm: 110, strokes: [line(100)] });
+  assert.equal(t.queue.length, 0);
+});
+
+test("a discrete edit that makes the song too big keeps the last good link and says so", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.live.changed("stroke");
+  t.set(tooBig());
+  t.live.changed("stroke");
+  assert.equal(t.writes.length, 1);
+  assert.equal(t.behind(), 1);
 });
 
 test("a song too big to link keeps the last good link and says so once", () => {
   const good = song(line(100));
   const t = rig(good);
   t.live.start();
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.writes.length, 1);
 
   t.set(tooBig());
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.writes.length, 1, "no wrong link is written");
   assert.equal(t.behind(), 1, "told once, not on every edit");
 
   t.set(song(line(100), line(500)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.writes.length, 2, "follows the song again once it fits");
   assert.deepEqual(songFromHash(t.writes[1]), song(line(100), line(500)));
 
   t.set(tooBig());
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.behind(), 2, "and says so again the next time it falls behind");
 });
@@ -143,7 +229,7 @@ test("flush writes a pending link at once, so a reload right after pen-up keeps 
   const t = rig(song(line(100)));
   t.live.start();
   t.set(song(line(100), line(200)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   assert.deepEqual(t.writes, [], "still waiting for idle");
   t.live.flush();
   assert.equal(t.writes.length, 1, "written synchronously");
@@ -156,7 +242,7 @@ test("flush writes a pending link at once, so a reload right after pen-up keeps 
 test("flush with nothing pending writes nothing", () => {
   const t = rig(song(line(100)));
   t.live.start();
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.idle();
   assert.equal(t.writes.length, 1);
   t.live.flush();
@@ -167,7 +253,7 @@ test("flush with nothing pending writes nothing", () => {
 test("before Share, flush writes nothing", () => {
   const t = rig(song(line(100)));
   t.set(song(line(100), line(200)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.live.flush();
   assert.deepEqual(t.writes, []);
   assert.equal(t.queue.length, 0);
@@ -177,10 +263,10 @@ test("after a flush, the next edit queues a write again", () => {
   const t = rig(song(line(100)));
   t.live.start();
   t.set(song(line(100), line(200)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   t.live.flush();
   t.set(song(line(100), line(200), line(300)));
-  t.live.changed();
+  t.live.changed("tempo-drag");
   assert.equal(t.queue.length, 1);
   t.idle();
   assert.deepEqual(songFromHash(t.writes.at(-1)!), song(line(100), line(200), line(300)));

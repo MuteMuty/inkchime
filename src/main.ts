@@ -4,7 +4,7 @@ import { History } from "./core/history.ts";
 import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
 import { prepareShare, songFromHash } from "./core/share.ts";
-import { LiveLink, type Schedule } from "./core/livelink.ts";
+import { LiveLink, type Edit, type Schedule } from "./core/livelink.ts";
 import { PlayInvite } from "./core/invite.ts";
 import { CURSOR_START, cursorStroke, describeCursor, describeNote, moveCursor } from "./core/keypen.ts";
 import { normalizePoints } from "./core/stroke.ts";
@@ -35,14 +35,15 @@ const whenIdle: Schedule = (run) => {
   const id = window.setTimeout(run, 100);
   return () => clearTimeout(id);
 };
-// After Share, the address bar follows the song (see core/livelink.ts). Before it, nothing changes.
+// After Share, the address bar follows the song (see core/livelink.ts): a discrete edit is
+// written at once, a tempo drag at the next idle moment. Before Share, nothing changes.
 const live = new LiveLink({
   song,
   write: (hash) => setHash(hash),
   schedule: whenIdle,
   onBehind: () => toast("This song is now too big for a link. The address bar keeps the last version that fit."),
 });
-// When the tab is hidden or unloaded, write any link still waiting for idle (an undo or tempo change just before).
+// When the tab is hidden or unloaded, write a tempo drag still waiting for idle.
 window.addEventListener("pagehide", () => live.flush());
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") live.flush();
@@ -95,11 +96,8 @@ function roomForStroke(): boolean {
 /** Add a finished stroke as one edit that can be undone: at pen-up, or a note placed with the keys. */
 function commitStroke(stroke: Stroke): void {
   edits.set([...edits.value, stroke]);
-  songChanged();
+  songChanged("stroke");
   stage.addStroke(stroke);
-  // Written at once: a reload starts from the address it was given,
-  // so a write still waiting for idle (or for pagehide) would lose this stroke.
-  live.flush();
 }
 
 const wrap = $("#canvas-wrap");
@@ -177,17 +175,17 @@ const undoBtn = $<HTMLButtonElement>("#undo");
 const clearBtn = $<HTMLButtonElement>("#clear");
 const hint = $("#hint");
 
-function songChanged(): void {
+function songChanged(edit: Edit): void {
   buckets = notesByStep(songToNotes(song()));
   undoBtn.setAttribute("aria-disabled", String(!edits.canUndo));
   clearBtn.setAttribute("aria-disabled", String(!edits.value.length));
   hint.classList.toggle("gone", edits.value.length > 0);
-  live.changed();
+  live.changed(edit);
 }
 
 /** Redraw everything after undo, clear or opening a link. */
-function songReplaced(): void {
-  songChanged();
+function songReplaced(edit: Edit): void {
+  songChanged(edit);
   stage.setStrokes(edits.value);
 }
 
@@ -226,14 +224,14 @@ function toggle(): void {
 }
 
 function undo(): void {
-  if (edits.undo()) songReplaced();
+  if (edits.undo()) songReplaced("undo");
 }
 
 function clearAll(): void {
   if (!edits.value.length) return;
   edits.set([]);
   endInvite();
-  songReplaced();
+  songReplaced("clear");
 }
 
 // --- controls ------------------------------------------------------------------------
@@ -261,13 +259,16 @@ function setSize(s: number): void {
 sizeInput.addEventListener("input", () => setSize(Number(sizeInput.value)));
 
 const tempoInput = $<HTMLInputElement>("#tempo");
-function setBpm(v: number): void {
+/** Set the tempo; `edit` says how the live link should take it (none while a song is being loaded). */
+function setBpm(v: number, edit?: Edit): void {
   bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, v));
   player.setBpm(bpm);
   $("#bpm-out").textContent = `${bpm} bpm`;
-  live.changed();
+  if (edit) live.changed(edit);
 }
-tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value)));
+// While the slider moves the link waits for idle; the value it is let go at is written at once.
+tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value), "tempo-drag"));
+tempoInput.addEventListener("change", () => setBpm(Number(tempoInput.value), "tempo"));
 
 // Space plays or pauses, but never steals the key from a button or link that has focus.
 function keepsSpace(target: EventTarget | null): boolean {
@@ -338,7 +339,7 @@ function loadSong(next: Song): void {
   setBpm(next.bpm);
   tempoInput.value = String(next.bpm);
   edits.reset(next.strokes);
-  songReplaced();
+  songReplaced("open");
 }
 
 // --- the invite to press play ------------------------------------------------------
@@ -372,7 +373,7 @@ tempoInput.value = String(bpm);
 setSize(size);
 setColor(color);
 setBpm(bpm);
-songChanged();
+songChanged("open");
 stage.setStrokes(edits.value);
 syncPlayUi();
 // Reloading a tab where Share was pressed: keep following the song.

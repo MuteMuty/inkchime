@@ -20,6 +20,20 @@ export function linkFor(song: Song): string | null {
   return back && back.bpm === song.bpm && !back.strokes.length ? hash : null;
 }
 
+/**
+ * What changed the song. Dragging the tempo slider is the only edit that comes as a
+ * stream of events; the rest are discrete: a stroke (pen-up or a note placed with the
+ * keys), undo, clear, the tempo slider let go, or another song opened in this tab.
+ */
+export type Edit = "stroke" | "undo" | "clear" | "tempo" | "open" | "tempo-drag";
+
+/**
+ * A reload starts from the address it was given, and in Chromium that address is fixed
+ * before `pagehide` runs, so a discrete edit is written at once. A drag waits for idle,
+ * so the link is encoded at most once per quiet moment rather than once per input event.
+ */
+export const writesAtOnce = (edit: Edit): boolean => edit !== "tempo-drag";
+
 /** Run `run` at some quiet moment later; returns a function that cancels it. */
 export type Schedule = (run: () => void) => () => void;
 
@@ -52,9 +66,14 @@ export class LiveLink {
     this.behind = false;
   }
 
-  /** The song changed. Before Share this does nothing; after, a write is queued (one for any burst of edits). */
-  changed(): void {
-    if (!this.on || this.cancel) return;
+  /**
+   * The song changed. Before Share this does nothing. After it, a discrete edit is
+   * written now (see `writesAtOnce`); a drag queues one write for the next idle moment.
+   */
+  changed(edit: Edit): void {
+    if (!this.on) return;
+    if (writesAtOnce(edit)) return this.sync();
+    if (this.cancel) return;
     this.cancel = this.deps.schedule(() => {
       this.cancel = null;
       this.sync();
@@ -62,8 +81,8 @@ export class LiveLink {
   }
 
   /**
-   * If a write is waiting for idle, do it now. The page calls this when it is being
-   * hidden or unloaded, so a reload in the same instant as pen-up keeps that stroke.
+   * If a write is waiting for idle (a tempo drag), do it now. The page calls this when
+   * it is being hidden, so a phone that drops a background tab reopens the latest song.
    */
   flush(): void {
     if (this.cancel) this.sync();

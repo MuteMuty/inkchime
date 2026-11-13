@@ -712,12 +712,23 @@ async function liveLink(browser, name, viewport, phone) {
   };
 
   await check(`${name} before Share the address bar is left alone`, async () => {
+    await page.evaluate(() => {
+      window.__writes = 0;
+      const replace = history.replaceState.bind(history);
+      history.replaceState = (...args) => (window.__writes++, replace(...args));
+    });
     await pickColour(page, "Pluck");
     await setSize(page, 6);
     await drawLine(page, 0.05, 0.3, rowCentre(5));
     await drawLine(page, 0.35, 0.6, rowCentre(9));
     await page.keyboard.press("Control+z");
     await setTempo(page, 100);
+    // A note placed with the keys, then undone; a clear, then undone.
+    await page.focus("#canvas-wrap");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Control+z");
+    await page.locator("#clear").click();
+    await page.keyboard.press("Control+z");
     await page.evaluate(() => {
       dispatchEvent(new Event("pagehide"));
       document.dispatchEvent(new Event("visibilitychange"));
@@ -725,6 +736,7 @@ async function liveLink(browser, name, viewport, phone) {
     await page.waitForTimeout(600);
     assert.equal(await hook.song(page).then((s) => s.strokes.length), 1);
     assert.equal(await hash(), "", "the address changed before Share was pressed");
+    assert.equal(await page.evaluate(() => window.__writes), 0, "the address bar was written before Share was pressed");
   });
 
   let shared = "";
@@ -797,6 +809,99 @@ async function liveLink(browser, name, viewport, phone) {
     assert.equal(await page.evaluate(() => history.length), historyLength, "the pen-up write added a browser-history entry");
   });
 
+  /**
+   * Hold every idle write in a queue only the test drains, and count address-bar writes,
+   * so only a write made at the edit itself can reach the reload.
+   */
+  const stallIdle = () =>
+    page.evaluate(() => {
+      window.__idle = [];
+      window.__writes = 0;
+      window.requestIdleCallback = (run) => window.__idle.push(run);
+      window.cancelIdleCallback = (id) => {
+        if (id > 0) window.__idle[id - 1] = null;
+      };
+      window.setTimeout = () => 0;
+      const replace = history.replaceState.bind(history);
+      history.replaceState = (...args) => (window.__writes++, replace(...args));
+    });
+  const idleWaiting = () => page.evaluate(() => window.__idle.filter(Boolean).length);
+  const writes = () => page.evaluate(() => window.__writes);
+  /**
+   * Make an edit with the idle write stalled, reload within a few ms of it, and check the
+   * page opens to `want`: a song, or a function that checks the song it opened to.
+   */
+  const reloadRightAfter = async (what, edit, want) => {
+    await stallIdle();
+    const before = await hash();
+    await edit();
+    const t0 = Date.now();
+    const reloaded = page.reload({ waitUntil: "networkidle" });
+    const gap = Date.now() - t0;
+    await reloaded;
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.ok(gap < 5, `reload was sent ${gap} ms after ${what}`);
+    assert.notEqual(await hash(), before, `the address bar did not take ${what} before the reload`);
+    const opened = await hook.song(page);
+    if (typeof want === "function") want(opened);
+    else assert.deepEqual(opened, want, `a reload right after ${what} opened a different song`);
+    assert.equal(await page.locator("#tempo").inputValue(), String(opened.bpm), `tempo control after ${what}`);
+    assert.equal(await page.evaluate(() => history.length), historyLength, `${what} added a browser-history entry`);
+    await noInvite(page, `when the author reloads right after ${what}`);
+  };
+
+  await check(`${name} a reload right after undo, a placed note, the tempo or clear keeps it`, async () => {
+    // A reload forgets the undo history, so draw the stroke to undo first.
+    let now = await hook.song(page);
+    await drawLine(page, 0.4, 0.75, rowCentre(12));
+    assert.equal((await hook.song(page)).strokes.length, now.strokes.length + 1);
+    await reloadRightAfter("undo", () => page.keyboard.press("Control+z"), now);
+
+    // A note placed with the keys goes the same way as pen-up.
+    now = await hook.song(page);
+    await page.focus("#canvas-wrap");
+    await reloadRightAfter("placing a note with Enter", () => page.keyboard.press("Enter"), (opened) => {
+      assert.equal(opened.bpm, now.bpm);
+      assert.deepEqual(opened.strokes.slice(0, -1), now.strokes, "a reload right after placing a note changed the strokes before it");
+      assert.equal(opened.strokes.length, now.strokes.length + 1, "the note placed just before the reload was dropped");
+      assert.equal(opened.strokes.at(-1).pts.length, 4, "the placed note should be a short dash");
+    });
+
+    // Dragging the tempo: no write per input event, one per idle moment; letting go writes at once.
+    now = await hook.song(page);
+    await stallIdle();
+    const dragged = await hash();
+    const drag = (from, to) =>
+      page.evaluate(
+        ([a, b]) => {
+          const el = document.querySelector("#tempo");
+          for (let v = a; v <= b; v++) {
+            el.value = String(v);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        },
+        [from, to],
+      );
+    await drag(61, 90);
+    assert.equal(await writes(), 0, "a tempo drag wrote the address bar on an input event");
+    assert.equal(await idleWaiting(), 1, "a tempo drag should queue one write for idle");
+    await page.evaluate(() => window.__idle.splice(0).forEach((run) => run && run()));
+    assert.equal(await writes(), 1, "the idle moment during a drag should write once");
+    assert.notEqual(await hash(), dragged, "the address bar did not follow the drag at idle");
+    await drag(91, 104);
+    assert.equal(await writes(), 1, "a tempo drag wrote the address bar on an input event");
+    assert.equal(await idleWaiting(), 1, "a tempo drag should queue one write for idle");
+    await reloadRightAfter(
+      "letting go of the tempo slider",
+      () => page.locator("#tempo").evaluate((el) => el.dispatchEvent(new Event("change", { bubbles: true }))),
+      { ...now, bpm: 104 },
+    );
+
+    now = await hook.song(page);
+    await reloadRightAfter("clear", () => page.locator("#clear").click(), { ...now, strokes: [] });
+    assert.ok(await page.locator("#hint").isVisible(), "hint after reloading a cleared song");
+  });
+
   // A link to an empty canvas (after Clear) has nothing to play: the usual hint, no invite.
   if (emptyLink) {
     const fresh = await openPage(browser, `${name} (empty link)`, ctxOptions, emptyLink);
@@ -813,6 +918,78 @@ async function liveLink(browser, name, viewport, phone) {
   await check(`${name} Back leaves the page`, async () => {
     await page.goBack({ waitUntil: "commit" });
     assert.ok(!page.url().startsWith(base), `Back stayed on the page: ${page.url()}`);
+  });
+  await context.close();
+}
+
+// Browsers cap address-bar writes (Safari throws past 100 replaceState calls in 30 s). Holding
+// Ctrl+Z after Share must still undo everything, and the address bar catches up once allowed.
+async function heldUndo(browser, name, viewport) {
+  const ctxOptions = { viewport, colorScheme: "dark" };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const paper = () => page.evaluate(() => document.querySelector("#paper").toDataURL());
+  const empty = await paper();
+  const box = await page.locator("#canvas-wrap").boundingBox();
+  const strokes = 150;
+
+  await check(`${name} 150 strokes, shared`, async () => {
+    for (let i = 0; i < strokes; i++) {
+      const x = box.x + box.width * (0.04 + 0.08 * (i % 10));
+      const y = box.y + box.height * ((1 + (i % 13)) / 15);
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + box.width * 0.05, y + 4, { steps: 2 });
+      await page.mouse.up();
+    }
+    assert.equal((await hook.song(page)).strokes.length, strokes);
+    await page.locator("#share").click();
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+  });
+
+  await check(`${name} holding Ctrl+Z past the browser's write limit`, async () => {
+    // Safari's rule, with a 4 s window instead of 30 s: past 100 calls in the window, replaceState
+    // throws. All 100 are spent already, as if by earlier edits, so every write in the burst is refused.
+    await page.evaluate(() => {
+      const replace = history.replaceState.bind(history);
+      window.__refused = 0;
+      window.__calls = 100;
+      window.__windowStart = performance.now();
+      history.replaceState = (...args) => {
+        if (performance.now() - window.__windowStart > 4000) (window.__windowStart = performance.now()), (window.__calls = 0);
+        if (++window.__calls > 100) {
+          window.__refused++;
+          throw new DOMException("Attempt to use history.replaceState() more than 100 times per 30 seconds", "SecurityError");
+        }
+        return replace(...args);
+      };
+    });
+    const stale = await page.evaluate(() => location.hash);
+    const t0 = Date.now();
+    for (let i = 0; i < strokes; i++) await page.keyboard.press("Control+z");
+    const burst = Date.now() - t0;
+    assert.deepEqual(errors, [], "page errors during the burst");
+    assert.ok(burst < 3500, `the burst took ${burst} ms, longer than the simulated limit window`);
+    assert.equal(await page.evaluate(() => location.hash), stale, "a refused write should leave the address bar as it was");
+    assert.ok((await page.evaluate(() => window.__refused)) > 0, "the burst should have reached the limit (the check would prove nothing)");
+    assert.equal((await hook.song(page)).strokes.length, 0, "every undo should land");
+    assert.equal(await paper(), empty, "the canvas should be empty after undoing every stroke");
+    assert.equal(await page.locator("#undo").getAttribute("aria-disabled"), "true", "nothing left to undo");
+    assert.ok(await page.locator("#hint").isVisible(), "hint on the emptied canvas");
+    // Once the window passes, the address bar catches up to the empty song on screen.
+    await page
+      .waitForFunction((prev) => location.hash !== prev && location.hash.startsWith("#v1."), stale, { timeout: 8000, polling: 50 })
+      .catch(() => {
+        throw new Error("the address bar never caught up after the burst");
+      });
+    const want = await hook.song(page);
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.deepEqual(await hook.song(page), want, "reload after the burst opened a different song");
+    assert.equal(want.strokes.length, 0);
+    assert.deepEqual(errors, [], "page errors after the burst");
   });
   await context.close();
 }
@@ -1037,6 +1214,7 @@ try {
   await emptyPlay(browser, "empty-play-phone", { width: 390, height: 844 }, true, false);
   await liveLink(browser, "live-desktop", { width: 1280, height: 900 }, false);
   await liveLink(browser, "live-phone", { width: 390, height: 844 }, true);
+  await heldUndo(browser, "held-undo-desktop", { width: 1280, height: 900 });
   await toastLayout(browser, "toast-phone-light", { width: 390, height: 844 }, "light", true, { short: 2, long: 3 });
   await toastLayout(browser, "toast-phone-dark", { width: 390, height: 844 }, "dark", true, { short: 2, long: 3 });
   await toastLayout(browser, "toast-desktop-dark", { width: 1280, height: 900 }, "dark", false, { short: 1, long: 1 });

@@ -4,7 +4,7 @@ import { History } from "./core/history.ts";
 import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
 import { prepareShare, songFromHash } from "./core/share.ts";
-import { LiveLink, type Schedule } from "./core/livelink.ts";
+import { LiveLink, type Edit, type Schedule } from "./core/livelink.ts";
 import { PlayInvite } from "./core/invite.ts";
 import { CURSOR_START, cursorStroke, describeCursor, describeNote, moveCursor } from "./core/keypen.ts";
 import { normalizePoints } from "./core/stroke.ts";
@@ -27,7 +27,7 @@ let lastSharedHash = "";
 const song = (): Song => ({ bpm, strokes: edits.value });
 
 /** Waits for a quiet moment, so encoding the link never lands in the middle of drawing. */
-const whenIdle: Schedule = (run) => {
+const idle: Schedule = (run) => {
   if (typeof requestIdleCallback === "function") {
     const id = requestIdleCallback(run, { timeout: 300 });
     return () => cancelIdleCallback(id);
@@ -35,14 +35,23 @@ const whenIdle: Schedule = (run) => {
   const id = window.setTimeout(run, 100);
   return () => clearTimeout(id);
 };
-// After Share, the address bar follows the song (see core/livelink.ts). Before it, nothing changes.
+/** The first quiet moment at least `delayMs` from now. */
+const whenIdle: Schedule = (run, delayMs = 0) => {
+  if (!delayMs) return idle(run);
+  let cancel = (): void => {};
+  const id = window.setTimeout(() => (cancel = idle(run)), delayMs);
+  return () => (clearTimeout(id), cancel());
+};
+// After Share, the address bar follows the song (see core/livelink.ts): a discrete edit is
+// written at once, a tempo drag at the next idle moment, and a held key at the pace the
+// browser allows. A write the browser refuses is tried again later. Before Share, nothing changes.
 const live = new LiveLink({
   song,
   write: (hash) => setHash(hash),
   schedule: whenIdle,
   onBehind: () => toast("This song is now too big for a link. The address bar keeps the last version that fit."),
 });
-// When the tab is hidden or unloaded, write any link still waiting for idle (an undo or tempo change just before).
+// When the tab is hidden or unloaded, write a tempo drag still waiting for idle.
 window.addEventListener("pagehide", () => live.flush());
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") live.flush();
@@ -95,11 +104,8 @@ function roomForStroke(): boolean {
 /** Add a finished stroke as one edit that can be undone: at pen-up, or a note placed with the keys. */
 function commitStroke(stroke: Stroke): void {
   edits.set([...edits.value, stroke]);
-  songChanged();
+  songChanged("stroke");
   stage.addStroke(stroke);
-  // Written at once: a reload starts from the address it was given,
-  // so a write still waiting for idle (or for pagehide) would lose this stroke.
-  live.flush();
 }
 
 const wrap = $("#canvas-wrap");
@@ -177,18 +183,18 @@ const undoBtn = $<HTMLButtonElement>("#undo");
 const clearBtn = $<HTMLButtonElement>("#clear");
 const hint = $("#hint");
 
-function songChanged(): void {
+function songChanged(edit: Edit): void {
   buckets = notesByStep(songToNotes(song()));
   undoBtn.setAttribute("aria-disabled", String(!edits.canUndo));
   clearBtn.setAttribute("aria-disabled", String(!edits.value.length));
   hint.classList.toggle("gone", edits.value.length > 0);
-  live.changed();
+  live.changed(edit);
 }
 
-/** Redraw everything after undo, clear or opening a link. */
-function songReplaced(): void {
-  songChanged();
+/** Redraw everything after undo, clear or opening a link. The canvas first, then the link. */
+function songReplaced(edit: Edit): void {
   stage.setStrokes(edits.value);
+  songChanged(edit);
 }
 
 let raf = 0;
@@ -226,14 +232,14 @@ function toggle(): void {
 }
 
 function undo(): void {
-  if (edits.undo()) songReplaced();
+  if (edits.undo()) songReplaced("undo");
 }
 
 function clearAll(): void {
   if (!edits.value.length) return;
   edits.set([]);
   endInvite();
-  songReplaced();
+  songReplaced("clear");
 }
 
 // --- controls ------------------------------------------------------------------------
@@ -261,13 +267,16 @@ function setSize(s: number): void {
 sizeInput.addEventListener("input", () => setSize(Number(sizeInput.value)));
 
 const tempoInput = $<HTMLInputElement>("#tempo");
-function setBpm(v: number): void {
+/** Set the tempo; `edit` says how the live link should take it (none while a song is being loaded). */
+function setBpm(v: number, edit?: Edit): void {
   bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, v));
   player.setBpm(bpm);
   $("#bpm-out").textContent = `${bpm} bpm`;
-  live.changed();
+  if (edit) live.changed(edit);
 }
-tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value)));
+// While the slider moves the link waits for idle; the value it is let go at is written at once.
+tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value), "tempo-drag"));
+tempoInput.addEventListener("change", () => setBpm(Number(tempoInput.value), "tempo"));
 
 // Space plays or pauses, but never steals the key from a button or link that has focus.
 function keepsSpace(target: EventTarget | null): boolean {
@@ -303,10 +312,15 @@ $("#share").addEventListener("click", async () => {
   // Only hand out a link that has been opened again here and found to be this song.
   const shared = prepareShare(song());
   if (!shared.ok) return toast("This song is too big to share as a link. Undo or clear a few lines and try again.");
-  setHash(shared.hash);
   live.start();
+  // If the browser refuses the address-bar write just now, the link still follows a moment later.
   try {
-    await navigator.clipboard.writeText(location.href);
+    setHash(shared.hash);
+  } catch {
+    live.changed("open");
+  }
+  try {
+    await navigator.clipboard.writeText(location.origin + location.pathname + location.search + shared.hash);
     toast("Link copied. Anyone who opens it hears your song.");
   } catch {
     toast("The link is in the address bar. Copy it from there.");
@@ -320,8 +334,9 @@ $("#share").addEventListener("click", async () => {
 const SHARED = { inkchime: "shared" } as const;
 const wasShared = (): boolean => (window.history.state as typeof SHARED | null)?.inkchime === SHARED.inkchime;
 function setHash(hash: string): void {
-  lastSharedHash = hash;
+  // Throws if the browser refuses (Safari: past 100 writes in 30 s); LiveLink catches it.
   if (location.hash !== hash || !wasShared()) window.history.replaceState(SHARED, "", location.pathname + location.search + hash);
+  lastSharedHash = hash;
 }
 
 // Pasting a different song link into this tab opens that song.
@@ -338,7 +353,7 @@ function loadSong(next: Song): void {
   setBpm(next.bpm);
   tempoInput.value = String(next.bpm);
   edits.reset(next.strokes);
-  songReplaced();
+  songReplaced("open");
 }
 
 // --- the invite to press play ------------------------------------------------------
@@ -372,7 +387,7 @@ tempoInput.value = String(bpm);
 setSize(size);
 setColor(color);
 setBpm(bpm);
-songChanged();
+songChanged("open");
 stage.setStrokes(edits.value);
 syncPlayUi();
 // Reloading a tab where Share was pressed: keep following the song.

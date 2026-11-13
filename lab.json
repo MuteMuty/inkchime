@@ -1,6 +1,6 @@
 {
   "name": "inkchime",
-  "url": "https://inkchime.erko-erka1.workers.dev",
+  "url": "https://inkchime.brightloopapps.com",
   "worker": "inkchime",
   "commands": {
     "install": "npm ci",

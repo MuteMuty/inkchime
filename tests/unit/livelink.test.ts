@@ -136,3 +136,52 @@ test("a song too big to link keeps the last good link and says so once", () => {
   t.idle();
   assert.equal(t.behind(), 2, "and says so again the next time it falls behind");
 });
+
+// --- flush (pagehide) ------------------------------------------------------------
+
+test("flush writes a pending link at once, so a reload right after pen-up keeps that stroke", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.set(song(line(100), line(200)));
+  t.live.changed();
+  assert.deepEqual(t.writes, [], "still waiting for idle");
+  t.live.flush();
+  assert.equal(t.writes.length, 1, "written synchronously");
+  assert.deepEqual(songFromHash(t.writes[0]), song(line(100), line(200)));
+  assert.equal(t.queue.length, 0, "the idle write is cancelled");
+  t.idle();
+  assert.equal(t.writes.length, 1, "and not written twice");
+});
+
+test("flush with nothing pending writes nothing", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.live.changed();
+  t.idle();
+  assert.equal(t.writes.length, 1);
+  t.live.flush();
+  t.live.flush();
+  assert.equal(t.writes.length, 1);
+});
+
+test("before Share, flush writes nothing", () => {
+  const t = rig(song(line(100)));
+  t.set(song(line(100), line(200)));
+  t.live.changed();
+  t.live.flush();
+  assert.deepEqual(t.writes, []);
+  assert.equal(t.queue.length, 0);
+});
+
+test("after a flush, the next edit queues a write again", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.set(song(line(100), line(200)));
+  t.live.changed();
+  t.live.flush();
+  t.set(song(line(100), line(200), line(300)));
+  t.live.changed();
+  assert.equal(t.queue.length, 1);
+  t.idle();
+  assert.deepEqual(songFromHash(t.writes.at(-1)!), song(line(100), line(200), line(300)));
+});

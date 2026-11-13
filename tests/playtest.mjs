@@ -607,6 +607,10 @@ async function liveLink(browser, name, viewport, phone) {
     await drawLine(page, 0.35, 0.6, rowCentre(9));
     await page.keyboard.press("Control+z");
     await setTempo(page, 100);
+    await page.evaluate(() => {
+      dispatchEvent(new Event("pagehide"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
     await page.waitForTimeout(600);
     assert.equal(await hook.song(page).then((s) => s.strokes.length), 1);
     assert.equal(await hash(), "", "the address changed before Share was pressed");
@@ -654,6 +658,31 @@ async function liveLink(browser, name, viewport, phone) {
     await reloadsTo("drawing a long line");
   });
   await page.screenshot({ path: join(out, `${name}-reloaded.png`) });
+
+  await check(`${name} a reload right after pen-up keeps that stroke`, async () => {
+    // Stall the idle write, so only the pen-up write can save the stroke, then reload within a few ms of pen-up.
+    await page.evaluate(() => {
+      window.requestIdleCallback = () => 0;
+      window.setTimeout = () => 0;
+    });
+    const before = await hash();
+    const want = (await hook.song(page)).strokes.length + 1;
+    const box = await page.locator("#canvas-wrap").boundingBox();
+    const py = box.y + rowCentre(3) * box.height;
+    await page.mouse.move(box.x + 0.15 * box.width, py);
+    await page.mouse.down();
+    for (let i = 1; i <= 8; i++) await page.mouse.move(box.x + (0.15 + 0.04 * i) * box.width, py);
+    await page.mouse.up();
+    const t0 = Date.now();
+    const reloaded = page.reload({ waitUntil: "networkidle" });
+    const gap = Date.now() - t0;
+    await reloaded;
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.ok(gap < 5, `reload was sent ${gap} ms after pen-up`);
+    assert.notEqual(await hash(), before, "the address bar did not take the last stroke before the reload");
+    assert.equal((await hook.song(page)).strokes.length, want, "the stroke drawn just before the reload was dropped");
+    assert.equal(await page.evaluate(() => history.length), historyLength, "the pen-up write added a browser-history entry");
+  });
 
   await check(`${name} Back leaves the page`, async () => {
     await page.goBack({ waitUntil: "commit" });

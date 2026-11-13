@@ -79,11 +79,13 @@
         <label class="slider" title="Thicker lines are louder">
           <span class="slider-name">Brush <span class="slider-note"><span class="slider-note-words">sets volume</span> <i id="brush-dot" class="brush-dot" aria-hidden="true"></i></span></span>
           <input id="size" type="range" min="1" max="8" step="1" value="4" aria-describedby="size-help" />
-          <span id="size-help" class="sr-only">Thicker lines are louder.</span>
         </label>
-        <!-- for="tempo": without it the <output>, the first labelable element inside, takes the label and the slider is left nameless. -->
+        <!-- Outside the label, so it is the slider's description and not also part of its name. -->
+        <p id="size-help" hidden>Thicker lines are louder.</p>
+        <!-- for="tempo": without it the <output>, the first labelable element inside, takes the label and the slider is left nameless.
+             aria-live="off": the slider's aria-valuetext already says the new tempo, so the output (a live region by default) stays quiet. -->
         <label class="slider" for="tempo" title="Loop speed">
-          <span class="slider-name">Tempo <output id="bpm-out" for="tempo">90 bpm</output></span>
+          <span class="slider-name">Tempo <output id="bpm-out" for="tempo" aria-live="off">90 bpm</output></span>
           <input id="tempo" type="range" min="60" max="120" step="1" value="90" aria-valuetext="90 bpm" />
         </label>
       </div>

@@ -1,5 +1,5 @@
 // Inkchime playtest: draws, plays, shares and reopens songs in a real browser, at
-// desktop-dark (1280x900) and phone-light (390x844) sizes, and a phone held sideways (844x390, 667x375).
+// desktop-dark (1280x900) and phone-light (390x844) sizes, and a phone held sideways (844x390, 667x375, 568x320).
 //
 // Headless browsers can't be heard, so sound is checked through the read-only
 // hook the page exposes, `window.__inkchime`: it lists every note handed to
@@ -1483,12 +1483,84 @@ async function likesLayout(browser, name, viewport, phone, total = 12) {
   console.log(`${name}: dock ${seen.ok.dock.height}px tall with or without the heart, canvas ${seen.ok.canvas.width}x${seen.ok.canvas.height}`);
 }
 
+// Held sideways, the toast sits over the canvas column, centred on it, and never on the dock (lab#43).
+async function landscapeToast(browser, name, viewport) {
+  const ctxOptions = { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const assertOverCanvas = async () => {
+    const m = await page.evaluate(() => {
+      const box = (sel) => document.querySelector(sel).getBoundingClientRect().toJSON();
+      return { toast: box("#toast"), dock: box(".dock"), canvas: box("#canvas-wrap"), text: document.querySelector("#toast").textContent };
+    });
+    const { toast: t, dock: d, canvas: c } = m;
+    const said = `"${m.text.slice(0, 24)}…"`;
+    const overlaps = t.left < d.right && t.right > d.left && t.top < d.bottom && t.bottom > d.top;
+    assert.ok(!overlaps, `${said} (${t.left.toFixed(1)} to ${t.right.toFixed(1)}) overlaps the dock (${d.left.toFixed(1)} to ${d.right.toFixed(1)})`);
+    assert.ok(t.left >= c.left - 0.5 && t.right <= c.right + 0.5, `${said} spans ${t.left.toFixed(1)} to ${t.right.toFixed(1)}, outside the canvas (${c.left.toFixed(1)} to ${c.right.toFixed(1)})`);
+    assert.ok(Math.abs(t.left + t.right - (c.left + c.right)) <= 2, `${said} is off centre over the canvas`);
+    assert.ok(t.top >= c.top - 0.5 && t.bottom <= c.bottom + 0.5, `${said} runs off the canvas vertically`);
+  };
+  await check(`${name} toast over the canvas, not the dock`, async () => {
+    await drawLine(page, 0.1, 0.5, 0.5);
+    await press(page, "tap", "#share");
+    await page.waitForFunction(() => /^Link copied/.test(document.querySelector("#toast").textContent), null, { timeout: 3000 });
+    await page.waitForTimeout(250);
+    await assertOverCanvas();
+    await page.screenshot({ path: join(out, `${name}-toast.png`) });
+    for (const text of LONG_TOASTS) {
+      await page.evaluate((t) => {
+        const el = document.querySelector("#toast");
+        el.textContent = t;
+        el.classList.add("show");
+      }, text);
+      await page.waitForTimeout(250);
+      await assertOverCanvas();
+    }
+  });
+  await context.close();
+}
+
+// The side dock is for windows under 500px tall (and wider than tall): a 1024x499 window gets it,
+// a 1024x500 desktop window keeps the dock below the canvas. Neither scrolls.
+async function dockPlacement(browser) {
+  for (const [height, beside] of [[499, true], [500, false]]) {
+    const name = `dock-1024x${height}`;
+    const { page, context, ok } = await openPage(browser, name, { viewport: { width: 1024, height }, colorScheme: "dark" });
+    if (!ok) {
+      await context.close();
+      continue;
+    }
+    await page.screenshot({ path: join(out, `${name}.png`) });
+    await check(`${name} dock ${beside ? "beside" : "below"} the canvas`, async () => {
+      const m = await layout(page);
+      if (beside) assert.ok(m.dock.left >= m.canvas.left + m.canvas.width, `the dock (left ${m.dock.left}) should sit beside the canvas (right ${m.canvas.left + m.canvas.width})`);
+      else assert.ok(m.dock.top >= m.canvas.top + m.canvas.height, `the dock (top ${m.dock.top}) should sit below the canvas (bottom ${m.canvas.top + m.canvas.height})`);
+      assert.ok(m.scroll <= height, `the page is ${m.scroll}px tall in a ${height}px window`);
+      assert.equal(m.wide, false, "the page scrolls sideways");
+    });
+    await context.close();
+  }
+}
+
 // Both sliders have a name in the accessibility tree at every size (lab#21): the Tempo
-// label holds an <output>, so it is tied to the slider with for="tempo".
+// label holds an <output>, so it is tied to the slider with for="tempo". Each is read once (lab#46):
+// Brush is named by its visible label alone ("Brush", plus "sets volume" where the slider is wide
+// enough to show those words) and described by its hint, and the bpm readout is not a live region,
+// so only aria-valuetext says a new tempo.
+// Names and descriptions come from the browser's own accessibility tree.
 async function sliderNames(browser, name, viewport, phone) {
   const ctxOptions = phone ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport };
   const { page, context, ok } = await openPage(browser, name, ctxOptions);
   if (!ok) return context.close();
+  const cdp = await context.newCDPSession(page);
+  const ax = async (selector) => {
+    const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector });
+    const [node] = (await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false })).nodes;
+    const live = node.properties?.find((p) => p.name === "live")?.value?.value;
+    return { role: node.role?.value, name: node.name?.value ?? "", description: node.description?.value ?? "", live };
+  };
   await check(`${name} both sliders are named`, async () => {
     const tempo = page.getByRole("slider", { name: /tempo/i });
     assert.equal(await tempo.count(), 1, "no slider named Tempo");
@@ -1498,6 +1570,17 @@ async function sliderNames(browser, name, viewport, phone) {
     await tempo.fill("110");
     assert.equal(await tempo.getAttribute("aria-valuetext"), "110 bpm", "aria-valuetext should follow the tempo");
     console.log(`${name}: slider names ${JSON.stringify(await page.locator(".sliders").ariaSnapshot())}`);
+  });
+  await check(`${name} each slider is read once`, async () => {
+    const brush = await ax("#size");
+    const brushName = (await page.locator(".slider-note-words").isVisible()) ? "Brush sets volume" : "Brush";
+    assert.deepEqual({ role: brush.role, name: brush.name, description: brush.description }, { role: "slider", name: brushName, description: "Thicker lines are louder." }, "the Brush slider's name and description");
+    const tempo = await ax("#tempo");
+    assert.deepEqual({ role: tempo.role, name: tempo.name }, { role: "slider", name: "Tempo" }, "the Tempo slider's name");
+    const readout = await ax("#bpm-out");
+    assert.ok(readout.live === undefined || readout.live === "off", `the bpm readout is a live region (live: ${readout.live}), so a tempo change is announced twice`);
+    assert.equal(await page.locator("#bpm-out").innerText(), "110 bpm", "the visible readout should follow the tempo");
+    console.log(`${name}: Brush "${brush.name}" (${brush.description}), Tempo "${tempo.name}", bpm readout live: ${readout.live ?? "none"}`);
   });
   await context.close();
 }
@@ -1613,6 +1696,10 @@ try {
   await likesLayout(browser, "likes-layout-desktop", { width: 1280, height: 900 }, false);
   await landscape(browser, "landscape-phone", { width: 844, height: 390 });
   await landscape(browser, "landscape-small-phone", { width: 667, height: 375 });
+  await landscapeToast(browser, "landscape-toast-phone", { width: 844, height: 390 });
+  await landscapeToast(browser, "landscape-toast-small-phone", { width: 667, height: 375 });
+  await landscapeToast(browser, "landscape-toast-smallest-phone", { width: 568, height: 320 });
+  await dockPlacement(browser);
   await sliderNames(browser, "slider-names-phone", { width: 390, height: 844 }, true);
   await sliderNames(browser, "slider-names-landscape", { width: 844, height: 390 }, true);
   await sliderNames(browser, "slider-names-desktop", { width: 1280, height: 900 }, false);

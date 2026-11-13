@@ -272,7 +272,7 @@ const tempoInput = $<HTMLInputElement>("#tempo");
 function setBpm(v: number, edit?: Edit): void {
   bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, v));
   player.setBpm(bpm);
-  $("#bpm-out").textContent = `${bpm} bpm`;
+  $("#bpm-out").textContent = tempoInput.ariaValueText = `${bpm} bpm`;
   if (edit) live.changed(edit);
 }
 // While the slider moves the link waits for idle; the value it is let go at is written at once.

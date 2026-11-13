@@ -81,9 +81,10 @@
           <input id="size" type="range" min="1" max="8" step="1" value="4" aria-describedby="size-help" />
           <span id="size-help" class="sr-only">Thicker lines are louder.</span>
         </label>
-        <label class="slider" title="Loop speed">
+        <!-- for="tempo": without it the <output>, the first labelable element inside, takes the label and the slider is left nameless. -->
+        <label class="slider" for="tempo" title="Loop speed">
           <span class="slider-name">Tempo <output id="bpm-out" for="tempo">90 bpm</output></span>
-          <input id="tempo" type="range" min="60" max="120" step="1" value="90" />
+          <input id="tempo" type="range" min="60" max="120" step="1" value="90" aria-valuetext="90 bpm" />
         </label>
       </div>
 

@@ -184,7 +184,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
     assert.equal(await page.locator("input[name=voice]").count() >= 3, true, "need at least 3 colours");
     const names = await page.locator(".voice .name").allInnerTexts();
     assert.ok(new Set(names).size === names.length && names.length >= 3, "each colour should name a different instrument");
-    assert.match(await page.locator("footer").innerText(), /built with AI at the speed of thought/);
+    assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab$/);
   });
   await noHorizontalOverflow(page, name, "empty");
   await page.screenshot({ path: join(out, `${name}-empty.png`) });

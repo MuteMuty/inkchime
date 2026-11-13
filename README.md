@@ -56,4 +56,4 @@ node tests/playtest.mjs http://localhost:4173
 
 It checks, at 1280 by 900 and 390 by 844: a drawn stroke is added; pressing play schedules its notes at the right times, with pitch from height and gain from thickness; the first sound comes within about 100 ms of the press; Space, Ctrl or ⌘ Z and the Tab order work; Share, then opening the link in a fresh page, gives the same strokes and the same note schedule; before Share the address bar is left alone, and after it every stroke, undo, tempo change and clear is followed, so a reload gives the same song, with no new history entry and no dropped frames while drawing; broken links open an empty canvas; nothing overflows sideways; and the console stays free of errors.
 
-Part of [BrightLoop Lab](https://github.com/MuteMuty/lab), built with AI at the speed of thought.
+Made by [Erik Pahor](https://github.com/MuteMuty) at [BrightLoop Lab](https://lab.brightloopapps.com).

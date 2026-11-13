@@ -4,6 +4,7 @@ import { History } from "./core/history.ts";
 import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
 import { prepareShare, songFromHash } from "./core/share.ts";
+import { LiveLink, type Schedule } from "./core/livelink.ts";
 import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { Player, type NoteEvent } from "./audio/player.ts";
@@ -22,6 +23,23 @@ let buckets: Note[][] = [];
 let lastSharedHash = "";
 
 const song = (): Song => ({ bpm, strokes: edits.value });
+
+/** Waits for a quiet moment, so encoding the link never lands in the middle of drawing. */
+const whenIdle: Schedule = (run) => {
+  if (typeof requestIdleCallback === "function") {
+    const id = requestIdleCallback(run, { timeout: 300 });
+    return () => cancelIdleCallback(id);
+  }
+  const id = window.setTimeout(run, 100);
+  return () => clearTimeout(id);
+};
+// After Share, the address bar follows the song (see core/livelink.ts). Before it, nothing changes.
+const live = new LiveLink({
+  song,
+  write: (hash) => setHash(hash),
+  schedule: whenIdle,
+  onBehind: () => toast("This song is now too big for a link. The address bar keeps the last version that fit."),
+});
 
 // --- audio -----------------------------------------------------------------
 
@@ -90,6 +108,7 @@ function songChanged(): void {
   undoBtn.setAttribute("aria-disabled", String(!edits.canUndo));
   clearBtn.setAttribute("aria-disabled", String(!edits.value.length));
   hint.classList.toggle("gone", edits.value.length > 0);
+  live.changed();
 }
 
 /** Redraw everything after undo, clear or opening a link. */
@@ -170,6 +189,7 @@ function setBpm(v: number): void {
   bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, v));
   player.setBpm(bpm);
   $("#bpm-out").textContent = `${bpm} bpm`;
+  live.changed();
 }
 tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value)));
 
@@ -207,8 +227,8 @@ $("#share").addEventListener("click", async () => {
   // Only hand out a link that has been opened again here and found to be this song.
   const shared = prepareShare(song());
   if (!shared.ok) return toast("This song is too big to share as a link. Undo or clear a few lines and try again.");
-  lastSharedHash = shared.hash;
-  setHash(lastSharedHash);
+  setHash(shared.hash);
+  live.start();
   try {
     await navigator.clipboard.writeText(location.href);
     toast("Link copied. Anyone who opens it hears your song.");
@@ -216,8 +236,16 @@ $("#share").addEventListener("click", async () => {
     toast("The link is in the address bar. Copy it from there.");
   }
 });
+/**
+ * Replaces the address, so the link never adds a Back step. The entry is marked as
+ * shared: the mark lives only in this tab's history, so a reload keeps following
+ * the song, while the same link opened anywhere else starts as before.
+ */
+const SHARED = { inkchime: "shared" } as const;
+const wasShared = (): boolean => (window.history.state as typeof SHARED | null)?.inkchime === SHARED.inkchime;
 function setHash(hash: string): void {
-  window.history.replaceState(null, "", location.pathname + location.search + hash);
+  lastSharedHash = hash;
+  if (location.hash !== hash || !wasShared()) window.history.replaceState(SHARED, "", location.pathname + location.search + hash);
 }
 
 // Pasting a different song link into this tab opens that song.
@@ -244,6 +272,11 @@ setBpm(bpm);
 songChanged();
 stage.setStrokes(edits.value);
 syncPlayUi();
+// Reloading a tab where Share was pressed: keep following the song.
+if (fromLink && wasShared()) {
+  lastSharedHash = location.hash;
+  live.start();
+}
 stage.setPlayhead(0);
 
 // Read-only view for the playtest: headless browsers can't be heard, so it

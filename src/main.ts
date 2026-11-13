@@ -5,6 +5,7 @@ import { notesByStep, songToNotes } from "./core/notes.ts";
 import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } from "./core/pitch.ts";
 import { prepareShare, songFromHash } from "./core/share.ts";
 import { LiveLink, type Schedule } from "./core/livelink.ts";
+import { PlayInvite } from "./core/invite.ts";
 import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { Player, type NoteEvent } from "./audio/player.ts";
@@ -88,6 +89,7 @@ const stage = new Stage($("#canvas-wrap"), {
   onStart(_x, y) {
     previewDegree = -1;
     $("#hint").classList.add("gone");
+    endInvite();
     preview(y);
   },
   onMove: (_x, y) => preview(y),
@@ -151,6 +153,7 @@ function toggle(): void {
   if (player.playing) player.pause();
   else {
     player.play();
+    endInvite();
     // The playhead still runs, so a line drawn now is heard; just say why it is quiet.
     if (!edits.value.length) toast("Nothing to play yet. Draw a line first.");
   }
@@ -165,6 +168,7 @@ function undo(): void {
 function clearAll(): void {
   if (!edits.value.length) return;
   edits.set([]);
+  endInvite();
   songReplaced();
 }
 
@@ -265,10 +269,37 @@ window.addEventListener("hashchange", () => {
 
 function loadSong(next: Song): void {
   if (player.playing) toggle();
+  // Opening another song here is the visitor's own doing: they know it is a song.
+  endInvite();
   setBpm(next.bpm);
   tempoInput.value = String(next.bpm);
   edits.reset(next.strokes);
   songReplaced();
+}
+
+// --- the invite to press play ------------------------------------------------------
+
+// A song link opened in a tab that never shared it (the author reloading their own
+// live link has the shared mark) gets a line saying it is a song: browsers can't autoplay.
+const invite = new PlayInvite(fromLink, wasShared());
+const inviteEl = $("#invite");
+
+function showInvite(): void {
+  const pill = document.createElement("p");
+  pill.className = "invite-pill";
+  pill.innerHTML = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor" /></svg>';
+  pill.append("Someone sent you a song. Press play to hear it.");
+  inviteEl.append(pill);
+  playBtn.classList.add("invited");
+  playBtn.setAttribute("aria-describedby", "invite");
+}
+
+/** The visitor played, drew, cleared or opened another song: hide the invite for good. */
+function endInvite(): void {
+  if (!invite.end()) return;
+  inviteEl.classList.add("gone");
+  playBtn.classList.remove("invited");
+  playBtn.removeAttribute("aria-describedby");
 }
 
 // --- start up ------------------------------------------------------------------------
@@ -286,6 +317,8 @@ if (fromLink && wasShared()) {
   live.start();
 }
 stage.setPlayhead(0);
+// Filled a moment after load, so screen readers notice the status region change and read it.
+if (invite.showing) requestAnimationFrame(() => invite.showing && showInvite());
 
 // Read-only view for the playtest: headless browsers can't be heard, so it
 // reports what was handed to Web Audio instead.

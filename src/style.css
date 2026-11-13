@@ -94,6 +94,7 @@ body {
 /* ---- the canvas ---- */
 
 .stage {
+  position: relative;
   flex: 1;
   min-height: 240px;
   display: flex;
@@ -164,6 +165,53 @@ body {
 .hint-sub { color: var(--ink-dim); max-width: 26rem; }
 .hint-keys { color: var(--ink-dim); font-size: 0.85rem; margin-top: 0.6rem !important; }
 @media (hover: none) { .hint-keys { display: none; } }
+
+/* Someone opened a song link: say it is a song, near the bottom edge, just above Play.
+   Pointer events pass through to the canvas, so drawing over it still works (and ends it). */
+.invite {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 14px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  transition: opacity 0.3s, visibility 0s linear 0s;
+}
+.invite.gone { opacity: 0; visibility: hidden; transition: opacity 0.3s, visibility 0s linear 0.3s; }
+.invite-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.5rem 1.1rem 0.5rem 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 1.4rem;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 14%, transparent);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+.invite-pill .icon {
+  flex: none;
+  box-sizing: content-box;
+  padding: 0.45rem;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* Play invites a first press with a soft ring; a still ring when motion is reduced. */
+button.primary.invited { animation: invite-ring 1.8s ease-out infinite; }
+@keyframes invite-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ink) 45%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--ink) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.primary.invited { animation: none; box-shadow: 0 0 0 4px color-mix(in srgb, var(--ink) 30%, transparent); }
+}
 
 /* ---- the dock ---- */
 

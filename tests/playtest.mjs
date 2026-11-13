@@ -206,11 +206,11 @@ async function session(browser, name, viewport, colorScheme, phone) {
   await noHorizontalOverflow(page, name, "empty");
   await page.screenshot({ path: join(out, `${name}-empty.png`) });
 
-  // Keyboard: Tab reaches every control, in order, each with a visible focus ring.
+  // Keyboard: Tab reaches the canvas and every control, in order, each with a visible focus ring.
   await check(`${name} tab order`, async () => {
     await page.evaluate(() => document.activeElement && document.activeElement.blur());
     const seen = [];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 9; i++) {
       await page.keyboard.press("Tab");
       seen.push(
         await page.evaluate(() => {
@@ -222,8 +222,8 @@ async function session(browser, name, viewport, colorScheme, phone) {
         }),
       );
     }
-    assert.equal(seen.slice(0, 7).join(" > "), "voice > play > undo > clear > share > size > tempo", `tab order was ${seen.join(" > ")}`);
-    assert.ok(!seen.slice(0, 7).some((s) => s.includes("no ring")), `a focused control has no visible ring: ${seen.join(", ")}`);
+    assert.equal(seen.slice(0, 8).join(" > "), "canvas-wrap > voice > play > undo > clear > share > size > tempo", `tab order was ${seen.join(" > ")}`);
+    assert.ok(!seen.slice(0, 8).some((s) => s.includes("no ring")), `a focused control has no visible ring: ${seen.join(", ")}`);
     await page.evaluate(() => document.activeElement && document.activeElement.blur());
   });
 
@@ -845,6 +845,184 @@ async function malformedLinks(browser) {
   }
 }
 
+// Keyboard only: Tab to the canvas, move the cursor with the arrows, place notes with Enter or N,
+// hear them on Play, undo one, share, and see the live link and the invite treat them like strokes.
+async function keyboardDraw(browser, name, viewport, colorScheme) {
+  const ctxOptions = { viewport, colorScheme };
+  const { page, context, ok } = await openPage(browser, name, ctxOptions);
+  if (!ok) return context.close();
+  const wrap = page.locator("#canvas-wrap");
+  const focused = () => page.evaluate(() => document.activeElement?.id || document.activeElement?.getAttribute("name") || document.activeElement?.tagName);
+  const cursorAt = async () => (await hook.state(page)).cursor;
+  const say = () => page.locator("#say").textContent().then((t) => t.replace(/ /g, "").trim());
+  const tabs = async (n, shift = false) => {
+    for (let i = 0; i < n; i++) await page.keyboard.press(shift ? "Shift+Tab" : "Tab");
+  };
+
+  await check(`${name} canvas is a keyboard target`, async () => {
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await tabs(1);
+    assert.equal(await focused(), "canvas-wrap", "the first Tab should reach the canvas");
+    const ring = await wrap.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { visible: el.matches(":focus-visible"), style: cs.outlineStyle, width: parseFloat(cs.outlineWidth), color: cs.outlineColor };
+    });
+    assert.ok(ring.visible && ring.style !== "none" && ring.width >= 2, `no visible focus ring on the canvas: ${JSON.stringify(ring)}`);
+    assert.ok(await page.locator("#cursor").isVisible(), "the keyboard cursor is not shown");
+    // Screen readers: a name, a description with the keys, and the visible hint not read a second time.
+    assert.equal(await wrap.getAttribute("aria-label"), "Drawing canvas");
+    const help = await page.locator(`#${await wrap.getAttribute("aria-describedby")}`).textContent();
+    assert.match(help, /arrow keys/i);
+    assert.match(help, /Enter or N/);
+    assert.equal(await page.locator("#hint").getAttribute("aria-hidden"), "true", "the hint would be read twice");
+    assert.equal(await page.locator("#say").getAttribute("aria-live"), "polite");
+  });
+  await page.screenshot({ path: join(out, `${name}-canvas-focus.png`) });
+
+  await check(`${name} arrows move the cursor, clamped at the edges`, async () => {
+    const scrollY = await page.evaluate(() => window.scrollY);
+    assert.deepEqual(await cursorAt(), { col: 0, row: 7 });
+    await page.keyboard.press("ArrowLeft");
+    assert.deepEqual(await cursorAt(), { col: 0, row: 7 }, "left edge");
+    for (let i = 0; i < 10; i++) await page.keyboard.press("ArrowUp");
+    assert.deepEqual(await cursorAt(), { col: 0, row: 0 }, "top edge");
+    for (let i = 0; i < 20; i++) await page.keyboard.press("ArrowDown");
+    assert.deepEqual(await cursorAt(), { col: 0, row: 14 }, "bottom edge");
+    for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowRight");
+    assert.deepEqual(await cursorAt(), { col: 31, row: 14 }, "right edge");
+    for (let i = 0; i < 27; i++) await page.keyboard.press("ArrowLeft");
+    for (let i = 0; i < 7; i++) await page.keyboard.press("ArrowUp");
+    assert.deepEqual(await cursorAt(), { col: 4, row: 7 });
+    assert.equal(await say(), "Column 5, pitch E4");
+    assert.equal(await page.evaluate(() => window.scrollY), scrollY, "arrow keys scrolled the page");
+    // The cursor is drawn over that cell of the grid.
+    const box = await wrap.boundingBox();
+    const c = await page.locator("#cursor").boundingBox();
+    assert.ok(near(c.x, box.x + (4 * box.width) / 32, 2) && near(c.y, box.y + (7 * box.height) / 15, 2), `cursor drawn at ${c.x},${c.y}`);
+    assert.ok(near(c.width, box.width / 32, 2) && near(c.height, box.height / 15, 2), `cursor is ${c.width}x${c.height}`);
+  });
+
+  await check(`${name} Enter places a note`, async () => {
+    await page.keyboard.press("Enter");
+    const song = await hook.song(page);
+    assert.equal(song.strokes.length, 1, "Enter did not place a note");
+    assert.equal(song.strokes[0].color, 0);
+    assert.equal(song.strokes[0].size, 4);
+    assert.deepEqual(
+      (await hook.schedule(page)).map((n) => [n.step, n.midi, n.voice]),
+      [[4, expectedMidi(7), 0]],
+      "the note should be in column 5 at the cursor's pitch",
+    );
+    assert.equal(await say(), "Bell, column 5, pitch E4");
+    assert.equal(await page.locator("#hint").evaluate((el) => el.classList.contains("gone")), true, "hint should fade out");
+    assert.equal(await page.locator("#undo").getAttribute("aria-disabled"), "false");
+  });
+
+  // Colour and size, by keyboard too: Tab to the colours, pick Pluck, then come back and press N.
+  await check(`${name} N places a note in the current colour and size`, async () => {
+    await tabs(1);
+    await page.keyboard.press("ArrowRight"); // Bell -> Pluck
+    await tabs(5); // play, undo, clear, share, size
+    assert.equal(await focused(), "size");
+    await page.keyboard.press("End"); // brush 8
+    await tabs(6, true);
+    assert.equal(await focused(), "canvas-wrap");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("n");
+    const song = await hook.song(page);
+    assert.equal(song.strokes.length, 2, "N did not place a note");
+    assert.deepEqual([song.strokes[1].color, song.strokes[1].size], [1, 8]);
+    const n = (await hook.schedule(page)).find((x) => x.voice === 1);
+    assert.deepEqual([n.step, n.midi], [5, expectedMidi(6)]);
+    assert.ok(near(n.gain, expectedGain(8), 1e-9), "gain from the brush size");
+    assert.equal(await say(), "Pluck, column 6, pitch G4");
+    // The same note again is a new edit, and is read out again.
+    await page.keyboard.press("N");
+    assert.equal((await hook.song(page)).strokes.length, 3);
+    assert.equal(await say(), "Pluck, column 6, pitch G4");
+  });
+
+  await check(`${name} Ctrl or ⌘ Z undoes a placed note`, async () => {
+    await page.keyboard.press("Control+z");
+    assert.equal((await hook.song(page)).strokes.length, 2);
+    await page.keyboard.press("Meta+z");
+    assert.equal((await hook.song(page)).strokes.length, 1);
+    assert.equal(await focused(), "canvas-wrap", "undo moved the focus");
+  });
+
+  await check(`${name} Space on the canvas plays the placed note`, async () => {
+    await page.keyboard.press("Space");
+    assert.equal((await hook.state(page)).playing, true, "Space should play");
+    await allNotesScheduled(page);
+    const state = await hook.state(page);
+    const events = await hook.events(page);
+    assert.ok(events.some((e) => e.step === 4 && e.midi === expectedMidi(7) && e.voice === 0), "the placed note was not heard");
+    checkEvents(name, events, state, { midi: expectedMidi(7), gain: expectedGain(4), voice: 0, steps: [4, 4] });
+    await page.keyboard.press("Space");
+    assert.equal((await hook.state(page)).playing, false, "Space should pause");
+    assert.equal(await focused(), "canvas-wrap");
+  });
+  await page.screenshot({ path: join(out, `${name}-placed.png`) });
+
+  await check(`${name} Tab moves on from the canvas`, async () => {
+    await tabs(1);
+    assert.equal(await focused(), "voice");
+    await tabs(1, true);
+    assert.equal(await focused(), "canvas-wrap");
+  });
+
+  // Share by keyboard, then a placed note is followed by the live link like any stroke.
+  let shareUrl = "";
+  await check(`${name} Share and the live link include placed notes`, async () => {
+    await page.locator("#share").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+    shareUrl = page.url();
+    await tabs(5, true); // clear, undo, play, voice, canvas
+    assert.equal(await focused(), "canvas-wrap");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((prev) => location.href !== prev, shareUrl, { timeout: 3000 }).catch(() => {
+      throw new Error("the address bar did not follow a placed note");
+    });
+    const followed = page.url();
+    const fresh = await openPage(browser, `${name} (followed link)`, ctxOptions, followed);
+    try {
+      assert.ok(fresh.ok);
+      assert.deepEqual(await hook.song(fresh.page), await hook.song(page), "the live link lost a placed note");
+    } finally {
+      await fresh.context.close();
+    }
+  });
+
+  // Someone who opens the shared link and places a note with the keys has acted: the invite goes.
+  if (shareUrl) {
+    const opened = await openPage(browser, `${name} (opened link)`, ctxOptions, shareUrl);
+    if (opened.ok) {
+      await check(`${name} a placed note ends the invite`, async () => {
+        assert.ok(await inviteShown(opened.page), "no invite on a shared link");
+        await opened.page.evaluate(() => document.activeElement && document.activeElement.blur());
+        await opened.page.keyboard.press("Tab");
+        await opened.page.keyboard.press("Enter");
+        await inviteGone(opened.page, "placing a note with Enter");
+        assert.equal((await hook.song(opened.page)).strokes.length, 2);
+      });
+    }
+    await opened.context.close();
+  }
+
+  // A click hides the keyboard cursor again; drawing with the mouse works as before.
+  await check(`${name} the mouse still draws`, async () => {
+    const before = (await hook.song(page)).strokes.length;
+    await drawLine(page, 0.6, 0.8, rowCentre(3));
+    assert.equal((await hook.song(page)).strokes.length, before + 1);
+    assert.equal(await page.locator("#cursor").isVisible(), false, "the keyboard cursor stays after a click");
+  });
+  await noHorizontalOverflow(page, name, "keyboard");
+  await context.close();
+}
+
 // --- run ---------------------------------------------------------------------------
 
 const launchOptions = existsSync(browserPath) ? { executablePath: browserPath } : {};
@@ -852,6 +1030,8 @@ const browser = await chromium.launch(launchOptions);
 try {
   await session(browser, "desktop-dark", { width: 1280, height: 900 }, "dark", false);
   await session(browser, "phone-light", { width: 390, height: 844 }, "light", true);
+  await keyboardDraw(browser, "keys-desktop-dark", { width: 1280, height: 900 }, "dark");
+  await keyboardDraw(browser, "keys-desktop-light", { width: 1280, height: 900 }, "light");
   await emptyPlay(browser, "empty-play-desktop", { width: 1280, height: 900 }, false, false);
   await emptyPlay(browser, "empty-play-space", { width: 1280, height: 900 }, false, true);
   await emptyPlay(browser, "empty-play-phone", { width: 390, height: 844 }, true, false);

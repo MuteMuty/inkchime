@@ -133,6 +133,23 @@ body {
   will-change: transform;
   transition: opacity 0.3s;
 }
+/* Keyboard drawing: the canvas takes the focus ring, and a cell-sized cursor shows where Enter places a note.
+   Only while the keys are in use (main.ts marks a press with a pointer), so drawing with a mouse or finger looks as before. */
+.canvas-wrap:focus-visible,
+.canvas-wrap.keys:focus { outline: 2.5px solid var(--focus); outline-offset: 3px; }
+/* Placed and sized in percent of the canvas by main.ts. */
+.cursor {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--paper), inset 0 0 0 1px var(--paper);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  display: none;
+  pointer-events: none;
+}
+.canvas-wrap:focus-visible:not(.pointer) .cursor,
+.canvas-wrap.keys:focus .cursor { display: block; }
+
 /* Shown from the first press of play, and kept where it paused. */
 .playhead.on { opacity: 0.55; }
 .playhead::before {

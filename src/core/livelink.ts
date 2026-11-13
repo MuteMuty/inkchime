@@ -61,6 +61,14 @@ export class LiveLink {
     });
   }
 
+  /**
+   * If a write is waiting for idle, do it now. The page calls this when it is being
+   * hidden or unloaded, so a reload in the same instant as pen-up keeps that stroke.
+   */
+  flush(): void {
+    if (this.cancel) this.sync();
+  }
+
   /** Write the link for the song as it is now, or keep the last good one if it doesn't fit. */
   sync(): void {
     if (!this.on) return;

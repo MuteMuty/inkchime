@@ -40,6 +40,11 @@ const live = new LiveLink({
   schedule: whenIdle,
   onBehind: () => toast("This song is now too big for a link. The address bar keeps the last version that fit."),
 });
+// When the tab is hidden or unloaded, write any link still waiting for idle (an undo or tempo change just before).
+window.addEventListener("pagehide", () => live.flush());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") live.flush();
+});
 
 // --- audio -----------------------------------------------------------------
 
@@ -93,6 +98,9 @@ const stage = new Stage($("#canvas-wrap"), {
     edits.set([...edits.value, stroke]);
     songChanged();
     stage.addStroke(stroke);
+    // Pen-up writes the link at once: a reload starts from the address it was given,
+    // so a write still waiting for idle (or for pagehide) would lose this stroke.
+    live.flush();
   },
 });
 

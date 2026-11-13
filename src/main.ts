@@ -6,6 +6,7 @@ import { degreeToMidi, gridYToDegree, loopSeconds, sizeToGain, stepSeconds } fro
 import { prepareShare, songFromHash } from "./core/share.ts";
 import { LiveLink, type Edit, type Schedule } from "./core/livelink.ts";
 import { PlayInvite } from "./core/invite.ts";
+import { Likes, likeLabel, shortCount } from "./core/likes.ts";
 import { CURSOR_START, cursorStroke, describeCursor, describeNote, moveCursor } from "./core/keypen.ts";
 import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
@@ -356,6 +357,41 @@ function loadSong(next: Song): void {
   songReplaced("open");
 }
 
+// --- likes ---------------------------------------------------------------------------
+// A heart with the live count from the lab hub (see core/likes.ts). It stays hidden
+// until the counts load and shows nothing if they never do. Drawing and sound never
+// wait for it, and it never touches the address bar. A like that doesn't go through
+// is rolled back and explained in the toast.
+
+const likeBtn = $<HTMLButtonElement>("#like");
+let likeStore: Storage | null = null;
+try {
+  likeStore = window.localStorage;
+} catch {
+  // Storage blocked: a like still works within this page.
+}
+const likes = new Likes({
+  fetch: (input, init) => fetch(input, init),
+  storage: likeStore,
+  onChange(s) {
+    likeBtn.hidden = !s.ready;
+    likeBtn.setAttribute("aria-pressed", String(s.liked));
+    likeBtn.setAttribute("aria-label", likeLabel(s.count));
+    if (s.busy) likeBtn.setAttribute("aria-busy", "true");
+    else likeBtn.removeAttribute("aria-busy");
+    $("#like-n").textContent = shortCount(s.count);
+  },
+  onNote: toast,
+});
+likeBtn.addEventListener("click", () => {
+  if (!likes.state.liked && !likes.state.busy) {
+    likeBtn.classList.remove("pop");
+    void likeBtn.offsetWidth; // restart the animation
+    likeBtn.classList.add("pop");
+  }
+  void likes.toggle();
+});
+
 // --- the invite to press play ------------------------------------------------------
 
 // A song link opened in a tab that never shared it (the author reloading their own
@@ -399,6 +435,8 @@ stage.setPlayhead(0);
 showCursor();
 // Filled a moment after load, so screen readers notice the status region change and read it.
 if (invite.showing) requestAnimationFrame(() => invite.showing && showInvite());
+// The counts load once the canvas is ready; nothing waits for them.
+void likes.load();
 
 // Read-only view for the playtest: headless browsers can't be heard, so it
 // reports what was handed to Web Audio instead.

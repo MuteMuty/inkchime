@@ -56,18 +56,94 @@ const hook = {
   state: (page) => page.evaluate(() => window.__inkchime.state()),
 };
 
-async function openPage(browser, name, ctxOptions, url = base) {
+// Every page talks to a mocked lab like API, never the live one, and may only ask
+// Inkchime's own origin and lab.brightloopapps.com/api/likes.
+const LAB = "https://lab.brightloopapps.com";
+const LIKE_KEY = "inkchime:like";
+
+/**
+ * A stateful stand-in for the hub's /api/likes. `mode`: "ok"; "resting" (what the live
+ * hub answers until its migration: 204 to a quiet GET, 503 otherwise); "down"
+ * (unreachable); "slow" (answers after 8 s, past the page's 6 s timeout). `next`
+ * forces the status of the next POST or DELETE (409, 429); `delay` holds each one.
+ */
+async function mockLikes(context, opts = {}) {
+  const api = { mode: "ok", total: 12, delay: 0, next: null, receipts: [], calls: [], ...opts };
+  const origin = new URL(base).origin;
+  await context.route(`${LAB}/**`, async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const method = req.method();
+    const cors = { "access-control-allow-origin": origin, vary: "Origin", "cache-control": "no-store" };
+    const send = (status, body) =>
+      route.fulfill({ status, headers: cors, contentType: "application/json", body: body === undefined ? undefined : JSON.stringify(body) }).catch(() => {});
+    api.calls.push({ method, path: url.pathname + url.search, body: req.postData(), cookie: req.headers().cookie });
+    if (method === "OPTIONS") {
+      return route.fulfill({ status: 204, headers: { ...cors, "access-control-allow-methods": "POST, DELETE", "access-control-allow-headers": "content-type" } }).catch(() => {});
+    }
+    if (api.mode === "down") return route.abort("failed").catch(() => {});
+    if (api.mode === "slow") return void setTimeout(() => send(200, { inkchime: { total: api.total, week: 1 } }), 8000);
+    if (api.mode === "resting") {
+      if (method === "GET" && url.searchParams.has("quiet")) return route.fulfill({ status: 204, headers: cors }).catch(() => {});
+      return send(503, { error: "Likes are resting right now. Try again later." });
+    }
+    const counts = () => ({ total: api.total, week: 3 });
+    if (method === "GET" && url.pathname === "/api/likes") return send(200, { inkchime: counts(), afterstep: { total: 40, week: 9 } });
+    if (url.pathname !== "/api/likes/inkchime") return send(404, { error: "Unknown project." });
+    if (api.delay) await new Promise((r) => setTimeout(r, api.delay));
+    const forced = api.next;
+    api.next = null;
+    if (forced === 429) return send(429, { error: "That's a lot of likes. Try again in a minute." });
+    if (method === "POST") {
+      if (forced === 409) return send(409, { error: "This network already liked it today.", ...counts() });
+      const receipt = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+      api.receipts.push(receipt);
+      api.total++;
+      return send(200, { receipt, ...counts() });
+    }
+    if (method === "DELETE") {
+      const { receipt } = JSON.parse(req.postData() || "{}");
+      if (!api.receipts.includes(receipt)) return send(404, { error: "That like wasn't found.", ...counts() });
+      api.receipts = api.receipts.filter((r) => r !== receipt);
+      api.total--;
+      return send(200, { ok: true, ...counts() });
+    }
+    return send(405, { error: "Use POST or DELETE." });
+  });
+  return api;
+}
+
+/**
+ * `likes` sets up the mocked like API (working, 12 likes, unless it says otherwise),
+ * `init` runs in the page before its own scripts, and `waitUntil` is when loading counts as done.
+ */
+async function openPage(browser, name, ctxOptions, url = base, { likes = {}, init, waitUntil = "networkidle" } = {}) {
   const context = await browser.newContext({ ...ctxOptions, permissions: ["clipboard-read", "clipboard-write"] });
+  const api = await mockLikes(context, likes);
+  if (init) await context.addInitScript(init);
   const page = await context.newPage();
-  page.on("console", (m) => m.type() === "error" && fail(`${name}: console error: ${m.text()}`));
+  page.likes = api;
+  const own = new URL(base).origin;
+  // The only console errors allowed are the browser's own network lines: for the 409 and 429
+  // answers a likes check asks for, and for an unreachable like API. Never one from page code.
+  const browserLine = (text) =>
+    (api.expectRefusals && /status of (409|429)/.test(text)) || (api.mode === "down" && /^Failed to load resource: net::ERR_FAILED$/.test(text));
+  page.on("console", (m) => m.type() === "error" && !browserLine(m.text()) && fail(`${name}: console error: ${m.text()}`));
   page.on("pageerror", (e) => fail(`${name}: page error: ${e.message}`));
+  page.on("request", (r) => {
+    const u = r.url();
+    if (u.startsWith("data:") || u.startsWith("blob:") || new URL(u).origin === own || u.startsWith(`${LAB}/api/likes`)) return;
+    fail(`${name}: request to somewhere other than Inkchime and the like API: ${u}`);
+  });
   page.on("requestfailed", (r) => {
     const why = r.failure()?.errorText ?? "";
     // The browser fetches the tab icon lazily; reloading the page (the live-link check does) cancels that fetch. Not a page error.
     if (why === "net::ERR_ABORTED" && new URL(r.url()).pathname === "/favicon.svg") return;
+    // An unreachable or slow like API is what those checks ask for (the page gives up on a slow one).
+    if (r.url().startsWith(`${LAB}/api/likes`) && (api.mode === "down" || api.mode === "slow")) return;
     fail(`${name}: request failed: ${r.url()} (${why})`);
   });
-  const res = await page.goto(url, { waitUntil: "networkidle" }).catch((e) => fail(`${name}: could not load ${url}: ${e.message}`));
+  const res = await page.goto(url, { waitUntil }).catch((e) => fail(`${name}: could not load ${url}: ${e.message}`));
   if (!res) return { page, context, ok: false };
   const ok = !!(await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 }).catch(() => null));
   if (!ok) fail(`${name}: canvas never rendered`);
@@ -222,8 +298,8 @@ async function session(browser, name, viewport, colorScheme, phone) {
         }),
       );
     }
-    assert.equal(seen.slice(0, 8).join(" > "), "canvas-wrap > voice > play > undo > clear > share > size > tempo", `tab order was ${seen.join(" > ")}`);
-    assert.ok(!seen.slice(0, 8).some((s) => s.includes("no ring")), `a focused control has no visible ring: ${seen.join(", ")}`);
+    assert.equal(seen.join(" > "), "canvas-wrap > voice > play > undo > clear > share > size > tempo > like", `tab order was ${seen.join(" > ")}`);
+    assert.ok(!seen.some((s) => s.includes("no ring")), `a focused control has no visible ring: ${seen.join(", ")}`);
     await page.evaluate(() => document.activeElement && document.activeElement.blur());
   });
 
@@ -609,6 +685,7 @@ async function emptyPlay(browser, name, viewport, phone, key) {
 const LONG_TOASTS = [
   "This song is too big to share as a link. Undo or clear a few lines and try again.",
   "This song is now too big for a link. The address bar keeps the last version that fit.",
+  "Someone on this network already liked Inkchime today. Thank you!",
 ];
 // The toast uses the width it has: centred, inside the window (and any safe-area inset), and short enough to read.
 async function toastLayout(browser, name, viewport, colorScheme, phone, maxLines) {
@@ -1200,6 +1277,249 @@ async function keyboardDraw(browser, name, viewport, colorScheme) {
   await context.close();
 }
 
+// --- likes ---------------------------------------------------------------------------
+
+/** What the heart shows. */
+const heart = (page) =>
+  page.evaluate(() => {
+    const b = document.querySelector("#like");
+    return { shown: !b.hidden && !!b.offsetParent, pressed: b.getAttribute("aria-pressed"), label: b.getAttribute("aria-label"), n: b.querySelector(".like-n").textContent };
+  });
+const heartReads = (n, pressed) => ({ shown: true, pressed: String(pressed), label: `Like Inkchime, ${n} ${n === 1 ? "like" : "likes"}`, n: String(n) });
+const likeSettled = (page) => page.waitForFunction(() => !document.querySelector("#like").hasAttribute("aria-busy"), null, { timeout: 8000 });
+const storedLike = (page) => page.evaluate((k) => JSON.parse(localStorage.getItem(k) || "null"), LIKE_KEY);
+/** The address bar and this tab's history, which liking must never touch. */
+const addressBar = (page) => page.evaluate(() => ({ href: location.href, length: history.length, state: JSON.stringify(history.state) }));
+const toastSays = (page, re) =>
+  page.waitForFunction((src) => {
+    const t = document.querySelector("#toast");
+    return t.classList.contains("show") && new RegExp(src).test(t.textContent);
+  }, re.source, { timeout: 3000 });
+
+// Liking (at once, before the API answers), reloading and unliking with the stored receipt,
+// also on a later day; the keyboard, label and aria-pressed; 409 and 429 roll back with a
+// polite toast; no cookies; and the address bar, history, live link and the invite to play
+// are left alone.
+async function likesFlow(browser, name, viewport, colorScheme, phone) {
+  const ctxOptions = phone ? { viewport, colorScheme, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme };
+  const how = phone ? "tap" : "click";
+  const { page, context, ok } = await openPage(browser, name, ctxOptions, base, { likes: { expectRefusals: true } });
+  if (!ok) return context.close();
+  const api = page.likes;
+  const tapLike = async () => {
+    await press(page, how, "#like");
+    await likeSettled(page);
+  };
+
+  await check(`${name} heart shows the count`, async () => {
+    await page.locator("#like").waitFor({ state: "visible", timeout: 3000 });
+    assert.deepEqual(await heart(page), heartReads(12, false));
+    assert.equal(api.calls[0]?.path, "/api/likes?quiet=1", "the counts should be asked for quietly");
+  });
+
+  let receipt = "";
+  await check(`${name} like, reload, unlike`, async () => {
+    await drawLine(page, 0.1, 0.4, rowCentre(5));
+    const before = await addressBar(page);
+    api.delay = 400;
+    await press(page, how, "#like");
+    assert.deepEqual(await heart(page), heartReads(13, true), "liking should show at once, before the API answers");
+    await likeSettled(page);
+    api.delay = 0;
+    const s = await storedLike(page);
+    assert.ok(s?.liked === true && s.receipt === api.receipts[0], `the receipt should be stored with the liked state, stored ${JSON.stringify(s)}`);
+    receipt = s.receipt;
+    assert.deepEqual(await addressBar(page), before, "liking should leave the address bar and history alone");
+    assert.equal((await hook.song(page)).strokes.length, 1, "liking should leave the song alone");
+    await page.locator(".dock").screenshot({ path: join(out, `${name}-dock-liked.png`) });
+
+    await page.reload({ waitUntil: "networkidle" });
+    await page.locator("#like").waitFor({ state: "visible", timeout: 3000 });
+    assert.deepEqual(await heart(page), heartReads(13, true), "the like should survive a reload");
+
+    await tapLike();
+    const del = api.calls.findLast((c) => c.method === "DELETE");
+    assert.equal(JSON.parse(del?.body ?? "{}").receipt, receipt, "unliking should send the stored receipt");
+    assert.deepEqual(await heart(page), heartReads(12, false));
+    assert.equal(await storedLike(page), null, "unliking should forget the receipt");
+    assert.equal(api.receipts.length, 0, "the mocked hub should no longer have the like");
+  });
+
+  if (!phone) {
+    await check(`${name} heart by keyboard`, async () => {
+      // From the canvas (the first stop), past the colours, transport and sliders.
+      await page.locator("#canvas-wrap").focus();
+      for (let i = 0; i < 8; i++) await page.keyboard.press("Tab");
+      assert.equal(await page.evaluate(() => document.activeElement.id), "like", "the heart should be the last Tab stop in the dock");
+      assert.ok(await page.locator("#like").evaluate((el) => el.matches(":focus-visible") && getComputedStyle(el).outlineStyle !== "none"), "the heart should show a focus ring");
+      await page.keyboard.press("Enter");
+      await likeSettled(page);
+      assert.deepEqual(await heart(page), heartReads(13, true), "Enter should like");
+      await page.keyboard.press("Space");
+      await likeSettled(page);
+      assert.deepEqual(await heart(page), heartReads(12, false), "Space on the heart should unlike");
+      assert.equal((await hook.state(page)).playing, false, "Space on the heart should not start playback");
+      assert.equal(await page.evaluate(() => document.activeElement.id), "like", "focus should stay on the heart");
+    });
+  }
+
+  await check(`${name} 409 and 429 roll back politely`, async () => {
+    api.next = 409;
+    await tapLike();
+    assert.deepEqual(await heart(page), heartReads(12, false), "a 409 should roll the like back");
+    await toastSays(page, /^Someone on this network already liked Inkchime today\. Thank you!$/);
+    await page.waitForTimeout(250); // the toast's fade-in
+    await page.screenshot({ path: join(out, `${name}-like-409.png`) });
+    await noHorizontalOverflow(page, name, "409 note");
+    await tapLike();
+    assert.deepEqual(await heart(page), heartReads(13, true), "a like after a 409 should go through");
+    api.next = 429;
+    await tapLike();
+    assert.deepEqual(await heart(page), heartReads(13, true), "a 429 on unlike should keep the like");
+    await toastSays(page, /Try again in a minute\.$/);
+    assert.ok((await storedLike(page))?.receipt, "a 429 on unlike should keep the receipt");
+  });
+
+  let shareUrl = "";
+  await check(`${name} the live link follows the song, not the heart`, async () => {
+    await drawLine(page, 0.1, 0.4, rowCentre(4));
+    await press(page, how, "#share");
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+    shareUrl = page.url();
+    const shared = await addressBar(page);
+    await tapLike();
+    await tapLike();
+    assert.deepEqual(await addressBar(page), shared, "liking should not write the live link or history");
+    await drawLine(page, 0.5, 0.8, rowCentre(9));
+    await page.waitForFunction((h) => location.href !== h, shared.href, { timeout: 3000 });
+    assert.equal(await page.evaluate(() => history.length), shared.length, "the live link still replaces, never pushes");
+  });
+
+  await check(`${name} liking leaves the invite to play alone`, async () => {
+    const opened = await openPage(browser, `${name} (opened link)`, ctxOptions, shareUrl);
+    try {
+      assert.ok(await inviteShown(opened.page), "the opened link should invite Play");
+      await opened.page.locator("#like").waitFor({ state: "visible", timeout: 3000 });
+      await press(opened.page, how, "#like");
+      await likeSettled(opened.page);
+      assert.equal((await heart(opened.page)).pressed, "true");
+      assert.equal(await invitePill(opened.page).isVisible(), true, "liking should not end the invite");
+      assert.equal(opened.page.url(), shareUrl, "liking should not change the opened link");
+      await press(opened.page, how, "#play");
+      await inviteGone(opened.page, "Play");
+    } finally {
+      await opened.context.close();
+    }
+  });
+
+  await check(`${name} no cookies`, async () => {
+    assert.deepEqual(await context.cookies(), []);
+    assert.equal(await page.evaluate(() => document.cookie), "");
+    assert.ok(!api.calls.some((c) => c.cookie), "a cookie was sent to the like API");
+  });
+
+  if (!phone) {
+    // The receipt carries no date: a like from days ago is still taken back by it.
+    await check(`${name} unlike on a later day`, async () => {
+      if ((await heart(page)).pressed !== "true") await tapLike();
+      const left = api.receipts.length;
+      await page.clock.install({ time: new Date(Date.now() + 3 * 24 * 3600 * 1000) });
+      await page.reload({ waitUntil: "load" });
+      await page.locator("#like").waitFor({ state: "visible", timeout: 3000 });
+      assert.equal((await heart(page)).pressed, "true");
+      await tapLike();
+      assert.equal((await heart(page)).pressed, "false");
+      assert.equal(api.receipts.length, left - 1, "the like should be gone from the mocked hub");
+    });
+  }
+  await context.close();
+}
+
+/** Where the dock, canvas and footer sit, and whether the page scrolls. */
+const layout = (page) =>
+  page.evaluate(() => {
+    const box = (sel) => {
+      const b = document.querySelector(sel).getBoundingClientRect();
+      return { top: Math.round(b.top * 2) / 2, height: Math.round(b.height * 2) / 2, left: Math.round(b.left * 2) / 2, width: Math.round(b.width * 2) / 2 };
+    };
+    return { dock: box(".dock"), canvas: box("#canvas-wrap"), foot: box(".foot"), scroll: document.documentElement.scrollHeight, wide: document.documentElement.scrollWidth > window.innerWidth };
+  });
+
+// The heart fits the dock: on a phone it shares the sliders' row and the dock is no
+// taller (a big count is shortened, 1.9k); on the desktop the dock keeps its one row.
+async function likesLayout(browser, name, viewport, phone, total = 12) {
+  const ctxOptions = phone ? { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme: "dark" };
+  const seen = {};
+  for (const mode of ["resting", "ok"]) {
+    const { page, context, ok } = await openPage(browser, `${name} (${mode})`, ctxOptions, base, { likes: { mode, total } });
+    if (!ok) return context.close();
+    if (mode === "ok") await page.locator("#like").waitFor({ state: "visible", timeout: 3000 }).catch(() => fail(`${name}: no heart`));
+    seen[mode] = await layout(page);
+    if (mode === "ok") {
+      seen.rows = await page.evaluate(() => {
+        const b = (sel) => document.querySelector(sel).getBoundingClientRect();
+        return { like: b("#like"), sliders: b(".sliders"), play: b("#play"), tempo: b("#tempo") };
+      });
+      seen.heart = await heart(page);
+      await noHorizontalOverflow(page, name, "with the heart");
+    }
+    await page.locator(".dock").screenshot({ path: join(out, `${name}-dock-${mode === "ok" ? "heart" : "no-heart"}.png`) });
+    await page.screenshot({ path: join(out, `${name}-${mode === "ok" ? "heart" : "no-heart"}.png`) });
+    await context.close();
+  }
+  await check(`${name} the heart fits the dock`, async () => {
+    const [a, b] = [seen.resting, seen.ok];
+    assert.equal(b.wide, false, "the heart makes the page scroll sideways");
+    assert.deepEqual({ dock: b.dock.height, canvas: b.canvas, foot: b.foot.top, scroll: b.scroll }, { dock: a.dock.height, canvas: a.canvas, foot: a.foot.top, scroll: a.scroll }, "the heart moved or resized the dock, canvas or footer");
+    const { like, sliders, play } = seen.rows;
+    if (total === 1999) assert.deepEqual(seen.heart, { shown: true, pressed: "false", label: "Like Inkchime, 1999 likes", n: "1.9k" }, "a big count shows short, the label exact");
+    if (phone) {
+      assert.ok(like.top >= sliders.top - 1 && like.bottom <= sliders.bottom + 1, "on a phone the heart should share the sliders' row");
+      assert.ok(like.height >= 40 && like.width >= 44, `the heart is too small to tap (${like.width}x${like.height})`);
+    } else {
+      assert.ok(Math.abs(like.top - play.top) <= 1 && Math.abs(like.height - play.height) <= 1, "on the desktop the heart should sit in the dock's one row, as tall as Play");
+    }
+  });
+  console.log(`${name}: dock ${seen.ok.dock.height}px tall with or without the heart, canvas ${seen.ok.canvas.width}x${seen.ok.canvas.height}`);
+}
+
+// The live hub until its migration (resting: 204 to a quiet GET), unreachable, and slow:
+// the canvas draws and plays at once, the heart never shows, and nothing errors.
+async function likesQuiet(browser, mode) {
+  const name = `likes-${mode}`;
+  const init = () => {
+    window.__heartSeen = false;
+    const look = () => {
+      const b = document.querySelector("#like");
+      if (b && !b.hidden && b.offsetParent) window.__heartSeen = true;
+      requestAnimationFrame(look);
+    };
+    requestAnimationFrame(look);
+  };
+  const t0 = Date.now();
+  const { page, context, ok } = await openPage(browser, name, { viewport: { width: 1280, height: 900 }, colorScheme: "dark" }, base, { likes: { mode }, init, waitUntil: "load" });
+  if (!ok) return context.close();
+  const painted = Date.now() - t0;
+  await check(`${name} drawing and playback don't wait`, async () => {
+    await drawLine(page, 0.1, 0.5, rowCentre(6));
+    assert.equal((await hook.song(page)).strokes.length, 1);
+    // The line starts a few columns in, so its first note is scheduled a moment after Play.
+    const pressed = Date.now();
+    await page.locator("#play").click();
+    await page.waitForFunction(() => window.__inkchime.events().length > 0, null, { timeout: 4000 });
+    const heard = Date.now() - pressed;
+    assert.ok(heard < 2500, `the line's first note was scheduled ${heard} ms after Play`);
+    await page.locator("#play").click();
+    await page.waitForTimeout(mode === "slow" ? 6800 : 800); // the page gives up on a slow answer after 6 s
+    assert.equal(await page.evaluate(() => window.__heartSeen), false, "the heart should never show");
+    assert.ok(page.likes.calls.some((c) => c.path === "/api/likes?quiet=1"), "the counts should have been asked for");
+    assert.ok(page.likes.calls.every((c) => c.method === "GET"), "nothing but the counts should be asked for");
+    assert.equal(await page.evaluate(() => location.hash), "", "the address bar should be left alone");
+    console.log(`${name}: canvas in ${painted} ms, the line's first note scheduled ${heard} ms after Play, no heart`);
+  });
+  await context.close();
+}
+
 // --- run ---------------------------------------------------------------------------
 
 const launchOptions = existsSync(browserPath) ? { executablePath: browserPath } : {};
@@ -1221,6 +1541,12 @@ try {
   await malformedLinks(browser);
   await fullSong(browser, "full-desktop", { width: 1280, height: 900 }, false);
   await fullSong(browser, "full-phone", { width: 390, height: 844 }, true);
+  await likesFlow(browser, "likes-desktop", { width: 1280, height: 900 }, "dark", false);
+  await likesFlow(browser, "likes-phone", { width: 390, height: 844 }, "light", true);
+  await likesLayout(browser, "likes-layout-phone", { width: 390, height: 844 }, true);
+  await likesLayout(browser, "likes-layout-small-phone", { width: 320, height: 640 }, true, 1999);
+  await likesLayout(browser, "likes-layout-desktop", { width: 1280, height: 900 }, false);
+  for (const mode of ["resting", "down", "slow"]) await likesQuiet(browser, mode);
 } finally {
   await browser.close();
 }

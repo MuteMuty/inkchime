@@ -275,9 +275,32 @@ function setBpm(v: number, edit?: Edit): void {
   $("#bpm-out").textContent = tempoInput.ariaValueText = `${bpm} bpm`;
   if (edit) live.changed(edit);
 }
-// While the slider moves the link waits for idle; the value it is let go at is written at once.
+// While the slider moves the link waits for idle; the value it is let go at is written at once,
+// even when a long drag has spent the write budget (lab#45). Arrow keys fire `change` on every
+// step, and a held key repeats: while a key is down its steps are a drag, and letting go of
+// the key (or leaving the slider) is letting go of the slider.
+const STEP_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
+const keysDown = new Set<string>();
+let keyMoved = false;
 tempoInput.addEventListener("input", () => setBpm(Number(tempoInput.value), "tempo-drag"));
-tempoInput.addEventListener("change", () => setBpm(Number(tempoInput.value), "tempo"));
+tempoInput.addEventListener("change", () => {
+  if (keysDown.size) keyMoved = true;
+  else setBpm(Number(tempoInput.value), "tempo");
+});
+tempoInput.addEventListener("keydown", (e) => {
+  if (STEP_KEYS.has(e.key)) keysDown.add(e.key);
+});
+function keyLetGo(key?: string): void {
+  if (key === undefined) keysDown.clear();
+  else keysDown.delete(key);
+  if (keysDown.size || !keyMoved) return;
+  keyMoved = false;
+  setBpm(Number(tempoInput.value), "tempo");
+}
+tempoInput.addEventListener("keyup", (e) => keyLetGo(e.key));
+tempoInput.addEventListener("blur", () => keyLetGo());
+// A pointer on the slider takes over from any key whose keyup the browser skipped.
+tempoInput.addEventListener("pointerdown", () => keyLetGo());
 
 // Space plays or pauses, but never steals the key from a button or link that has focus.
 function keepsSpace(target: EventTarget | null): boolean {

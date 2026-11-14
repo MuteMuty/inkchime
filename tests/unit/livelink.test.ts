@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LiveLink, linkFor, writesAtOnce, type Edit } from "../../src/core/livelink.ts";
+import { BURST, LiveLink, REFILL_MS, linkFor, writesAtOnce, type Edit } from "../../src/core/livelink.ts";
 import { prepareShare, songFromHash } from "../../src/core/share.ts";
 import { GRID, MAX_STROKES, type Song, type Stroke } from "../../src/core/model.ts";
 
@@ -57,6 +57,7 @@ function rig(start: Song) {
   let refuse = false;
   let refused = 0;
   const writes: string[] = [];
+  const times: number[] = [];
   const queue: (() => void)[] = [];
   const delays: number[] = [];
   const dues: number[] = [];
@@ -69,6 +70,7 @@ function rig(start: Song) {
         throw new DOMException("Attempt to use history.replaceState() more than 100 times per 30 seconds", "SecurityError");
       }
       writes.push(h);
+      times.push(clock);
     },
     schedule: (run, delay = 0) => {
       queue.push(run);
@@ -85,6 +87,8 @@ function rig(start: Song) {
   return {
     live,
     writes,
+    /** The clock at each write. */
+    times,
     queue,
     delays,
     behind: () => behind,
@@ -398,4 +402,119 @@ test("a single undo after a burst has calmed down writes at once again", () => {
   t.live.changed("undo");
   assert.equal(t.writes.length, before + 1, "written synchronously");
   assert.equal(t.queue.length, 0);
+});
+
+// --- letting go after a long drag (lab#45) ---------------------------------------------
+// A drag writes at idle moments, and those writes come from the same budget as every
+// other edit. Letting go is one discrete edit at the end of a gesture: it must land in the
+// address bar at once even when the drag has spent the budget, so a reload right after
+// it opens the released tempo, not one from the middle of the drag.
+
+/** Drag the tempo for `ms`, an input event per frame, running each idle write as it comes due. */
+function drag(t: ReturnType<typeof rig>, from: number, to: number, ms: number, frame = 16): void {
+  const steps = Math.max(1, Math.round(ms / frame));
+  for (let i = 0; i <= steps; i++) {
+    t.set({ bpm: Math.round(from + ((to - from) * i) / steps), strokes: [line(100)] });
+    t.live.changed("tempo-drag");
+    t.tick(frame);
+    t.runDue();
+  }
+}
+
+test("letting go after a drag that drained the budget writes the released tempo at once", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  drag(t, 90, 120, 600); // a long drag: an idle write most frames until the budget is spent
+  drag(t, 120, 64, 900);
+  assert.ok(t.writes.length >= BURST, `the drag spent the burst (${t.writes.length} writes)`);
+  assert.notEqual(songFromHash(t.writes.at(-1)!)?.bpm, 64, "the last drag write is an in-between tempo");
+  const before = t.writes.length;
+  t.live.changed("tempo");
+  assert.equal(t.writes.length, before + 1, "written synchronously, with no wait for the budget");
+  assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 64);
+  assert.equal(t.queue.length, 0, "the drag's waiting write is cancelled");
+  t.idle();
+  assert.equal(t.writes.length, before + 1, "and not written twice");
+});
+
+test("a tempo drag of any length stays throttled to the write budget", () => {
+  for (const ms of [100, 500, 2000, 8000]) {
+    const t = rig(song(line(100)));
+    t.live.start();
+    drag(t, 60, 120, ms);
+    const most = BURST + Math.ceil(ms / REFILL_MS) + 1;
+    assert.ok(t.writes.length <= most, `${t.writes.length} writes in a ${ms} ms drag (at most ${most})`);
+    t.live.changed("tempo");
+    assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 120, `released at 120 after a ${ms} ms drag`);
+    assert.equal(t.queue.length, 0);
+  }
+});
+
+test("holding an arrow key on the slider, then letting go, writes the final tempo at once", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  drag(t, 90, 60, 1500, 33); // key auto-repeat: a step every ~33 ms, each a drag step
+  t.live.changed("tempo"); // keyup
+  assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 60);
+  assert.equal(t.queue.length, 0);
+});
+
+test("letting go after an undo burst still writes at once", () => {
+  const t = rig(song(line(100), line(200), line(300)));
+  t.live.start();
+  for (let i = 0; i < BURST; i++) t.live.changed("undo"); // the burst is spent
+  drag(t, 90, 100, 100);
+  t.set({ bpm: 101, strokes: [line(100)] });
+  t.live.changed("tempo");
+  assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 101);
+  assert.equal(t.queue.length, 0);
+});
+
+test("letting go borrows from the budget: the edits after it wait their turn", () => {
+  const t = rig(song(line(100), line(200)));
+  t.live.start();
+  drag(t, 90, 110, 1000);
+  t.live.changed("tempo");
+  const before = t.writes.length;
+  t.set(song(line(100)));
+  t.live.changed("undo");
+  assert.equal(t.writes.length, before, "the undo right after waits for the budget");
+  assert.equal(t.queue.length, 1);
+  t.idle();
+  assert.deepEqual(songFromHash(t.writes.at(-1)!), song(line(100)), "and is written once it allows");
+});
+
+test("many short drags let go in a row stay under Safari's 100 writes per 30 s", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  const gestures = 400; // about ten a second for 45 seconds, far quicker than anyone adjusts a tempo
+  for (let i = 0; i < gestures; i++) {
+    drag(t, 60 + (i % 60), 61 + (i % 60), 50);
+    t.live.changed("tempo");
+    t.tick(50);
+    t.runDue();
+  }
+  let most = 0;
+  for (let i = 0; i < t.times.length; i++) {
+    let n = 0;
+    while (i + n < t.times.length && t.times[i + n] < t.times[i] + 30_000) n++;
+    most = Math.max(most, n);
+  }
+  assert.ok(most < 100, `${most} writes in the busiest 30 s`);
+  t.idle();
+  assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 61 + ((gestures - 1) % 60), "the address bar ends on the tempo on screen");
+});
+
+test("letting go while the browser refuses writes waits for the retry instead of hammering it", () => {
+  const t = rig(song(line(100)));
+  t.live.start();
+  t.refuse(true);
+  drag(t, 90, 100, 200);
+  const tries = t.refused();
+  t.live.changed("tempo");
+  assert.equal(t.refused(), tries, "no extra write while refused");
+  assert.equal(t.queue.length, 1, "one write still waiting");
+  t.refuse(false);
+  t.live.flush();
+  assert.equal(songFromHash(t.writes.at(-1)!)?.bpm, 100);
 });

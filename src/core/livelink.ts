@@ -34,6 +34,14 @@ export type Edit = "stroke" | "undo" | "clear" | "tempo" | "open" | "tempo-drag"
  */
 export const writesAtOnce = (edit: Edit): boolean => edit !== "tempo-drag";
 
+/**
+ * Letting go of the tempo slider (pointer or key) ends a drag whose idle writes may have
+ * spent the budget, and a reload right after it must still open the tempo it was let go
+ * at (lab#45). So it may borrow from the budget: it writes at once, and the writes after
+ * it wait until the budget is back in credit.
+ */
+export const endsDrag = (edit: Edit): boolean => edit === "tempo";
+
 /** Run `run` at some quiet moment, no sooner than `delayMs` from now; returns a function that cancels it. */
 export type Schedule = (run: () => void, delayMs?: number) => () => void;
 
@@ -46,6 +54,11 @@ export type Schedule = (run: () => void, delayMs?: number) => () => void;
  */
 export const BURST = 5;
 export const REFILL_MS = 350;
+/**
+ * How far letting go may borrow. Over any 30 s that is at most BURST + BORROW + 30000 /
+ * REFILL_MS (about 96) writes, still under Safari's 100.
+ */
+export const BORROW = BURST;
 /** After the browser refuses a write, try again this much later (or at flush). */
 export const RETRY_MS = 1000;
 
@@ -90,12 +103,13 @@ export class LiveLink {
 
   /**
    * The song changed. Before Share this does nothing. After it, a discrete edit is
-   * written now (see `writesAtOnce`) if the write budget allows; a drag, or an edit
-   * in a burst past the budget, leaves one write waiting for later.
+   * written now (see `writesAtOnce`) if the write budget allows (letting go of the
+   * tempo may borrow from it, see `endsDrag`); a drag, or an edit in a burst past the
+   * budget, leaves one write waiting for later.
    */
   changed(edit: Edit): void {
     if (!this.on) return;
-    if (writesAtOnce(edit) && !this.refused && this.take()) return this.sync();
+    if (writesAtOnce(edit) && !this.refused && this.take(endsDrag(edit) ? -BORROW : 0)) return this.sync();
     this.later(writesAtOnce(edit) && !this.refused ? this.untilToken() : 0);
   }
 
@@ -151,9 +165,10 @@ export class LiveLink {
     this.filled = t;
   }
 
-  private take(): boolean {
+  /** Spend one write, unless that would leave the budget below `floor`. */
+  private take(floor = 0): boolean {
     this.refill();
-    if (this.tokens < 1) return false;
+    if (this.tokens - 1 < floor) return false;
     this.tokens -= 1;
     return true;
   }

@@ -979,6 +979,121 @@ async function liveLink(browser, name, viewport, phone) {
     assert.ok(await page.locator("#hint").isVisible(), "hint after reloading a cleared song");
   });
 
+  // lab#45: a long drag with real idle moments spends the write budget on its idle writes.
+  // Letting go must still be in the address bar at once, so a reload right after it opens
+  // the tempo let go at, not one from the middle of the drag.
+  /** Count address-bar writes (with idle moments left alone), and the time of each. */
+  const countWrites = () =>
+    page.evaluate(() => {
+      window.__writeTimes = [];
+      const replace = history.replaceState.bind(history);
+      history.replaceState = (...args) => (window.__writeTimes.push(performance.now()), replace(...args));
+    });
+  const writeTimes = () => page.evaluate(() => window.__writeTimes);
+  /** The most writes a stretch of `ms` may make: the burst, then one per 350 ms. */
+  const budget = (ms) => 5 + Math.ceil(ms / 350) + 1;
+  /** Let go, reload within a few ms, and check the page opens to the tempo on screen at that moment. */
+  const reloadAtOnce = async (what, letGo) => {
+    const want = await hook.song(page);
+    await letGo();
+    const t0 = Date.now();
+    const reloaded = page.reload({ waitUntil: "networkidle" });
+    const gap = Date.now() - t0;
+    await reloaded;
+    await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+    assert.ok(gap < 5, `reload was sent ${gap} ms after ${what}`);
+    const opened = await hook.song(page);
+    assert.equal(opened.bpm, want.bpm, `a reload right after ${what} opened ${opened.bpm} bpm, not the ${want.bpm} it was let go at`);
+    assert.deepEqual(opened, want, `a reload right after ${what} opened a different song`);
+    assert.equal(await page.locator("#tempo").inputValue(), String(want.bpm), `tempo control after ${what}`);
+    assert.equal(await page.evaluate(() => history.length), historyLength, `${what} added a browser-history entry`);
+  };
+
+  await check(`${name} a reload right after letting go of a long tempo drag keeps the released tempo`, async () => {
+    const slider = page.locator("#tempo");
+    await slider.scrollIntoViewIfNeeded();
+    const box = await slider.boundingBox();
+    const y = box.y + box.height / 2;
+    const at = (f) => box.x + f * box.width;
+    for (const [from, to, frames] of [
+      [0.9, 0.1, 30], // about half a second
+      [0.1, 0.95, 90], // about a second and a half
+    ]) {
+      await countWrites();
+      const t0 = Date.now();
+      await page.mouse.move(at(from), y);
+      await page.mouse.down();
+      // A finger or mouse moving at a steady pace, a frame or so apart, with idle moments between.
+      for (let i = 1; i <= frames; i++) {
+        await page.mouse.move(at(from + ((to - from) * i) / frames), y);
+        await page.waitForTimeout(16);
+      }
+      // Settle a few steps back from the far end, so the value let go at is not one the drag had idle time to write.
+      await page.mouse.move(at(to + (from - to) * 0.08), y);
+      const during = await writeTimes();
+      const ms = Date.now() - t0;
+      console.log(`${name}: ${during.length} address-bar writes during a ${ms} ms tempo drag`);
+      assert.ok(during.length >= 5, `the drag should spend the write budget (${during.length} writes), or this check proves nothing`);
+      assert.ok(during.length <= budget(ms), `${during.length} writes during a ${ms} ms drag: more than the budget allows`);
+      await reloadAtOnce(`letting go of a ${ms} ms tempo drag`, () => page.mouse.up());
+    }
+  });
+
+  await check(`${name} a reload right after letting go of a held arrow key keeps the released tempo`, async () => {
+    for (const [key, start] of [
+      ["ArrowLeft", 110],
+      ["ArrowRight", 70],
+    ]) {
+      // Start far enough from the end the key moves towards that 45 steps never reach it.
+      await setTempo(page, start);
+      await page.locator("#tempo").focus();
+      await countWrites();
+      const t0 = Date.now();
+      // Auto-repeat: a keydown about every 33 ms for a second and a half.
+      for (let i = 0; i < 45; i++) {
+        await page.keyboard.down(key);
+        await page.waitForTimeout(33);
+      }
+      const during = await writeTimes();
+      const ms = Date.now() - t0;
+      console.log(`${name}: ${during.length} address-bar writes while holding ${key} for ${ms} ms`);
+      assert.ok(during.length >= 5, `holding ${key} should spend the write budget (${during.length} writes), or this check proves nothing`);
+      assert.ok(during.length <= budget(ms), `${during.length} writes while holding ${key} for ${ms} ms: more than the budget allows`);
+      await reloadAtOnce(`letting go of ${key}`, () => page.keyboard.up(key));
+    }
+  });
+
+  await check(`${name} a tempo drag still waiting for idle is written when the tab is hidden`, async () => {
+    for (const [what, hide] of [
+      ["pagehide", () => page.evaluate(() => dispatchEvent(new Event("pagehide")))],
+      [
+        "visibilitychange",
+        () =>
+          page.evaluate(() => {
+            Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+            document.dispatchEvent(new Event("visibilitychange"));
+            delete document.visibilityState;
+          }),
+      ],
+    ]) {
+      await stallIdle();
+      const bpm = what === "pagehide" ? 77 : 113;
+      await page.evaluate((v) => {
+        const el = document.querySelector("#tempo");
+        el.value = String(v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }, bpm);
+      assert.equal(await writes(), 0, "a tempo drag wrote the address bar on an input event");
+      await hide();
+      assert.equal(await writes(), 1, `${what} should write the drag still waiting for idle`);
+      const want = await hook.song(page);
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 });
+      assert.deepEqual(await hook.song(page), want, `a reload after ${what} opened a different song`);
+      assert.equal(await page.locator("#tempo").inputValue(), String(bpm), `tempo control after ${what}`);
+    }
+  });
+
   // A link to an empty canvas (after Clear) has nothing to play: the usual hint, no invite.
   if (emptyLink) {
     const fresh = await openPage(browser, `${name} (empty link)`, ctxOptions, emptyLink);

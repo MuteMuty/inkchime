@@ -53,7 +53,7 @@ The playtest drives a real browser. Headless audio can't be heard, so the page e
 
 ```sh
 npx vite preview --port 4173 --strictPort &
-node tests/playtest.mjs http://localhost:4173
+node tests/playtest.ts http://localhost:4173
 # PLAYTEST_BROWSER  Chromium-based browser executable (default: Brave; falls back to Playwright's Chromium)
 # PLAYTEST_OUT      screenshot folder (default: ./playtest-out)
 ```

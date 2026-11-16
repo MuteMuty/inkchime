@@ -6,7 +6,7 @@
 // Web Audio (with its exact audio-clock start time), plus the schedule the
 // strokes should produce.
 //
-// Usage: node tests/playtest.mjs <baseUrl>
+// Usage: node tests/playtest.ts <baseUrl>
 // Env:   PLAYTEST_BROWSER  Chromium-based browser executable (default: Brave)
 //        PLAYTEST_OUT      screenshot folder (default: ./playtest-out)
 // Exit:  0 = pass, 1 = fail (reasons printed)
@@ -18,13 +18,15 @@ import assert from "node:assert/strict";
 
 const base = process.argv[2];
 if (!base) {
-  console.error("usage: node tests/playtest.mjs <baseUrl>");
+  console.error("usage: node tests/playtest.ts <baseUrl>");
   process.exit(2);
 }
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = process.env.PLAYTEST_OUT || join(repo, "playtest-out");
 const browserPath = process.env.PLAYTEST_BROWSER || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 mkdirSync(out, { recursive: true });
+
+declare global { interface Window { [hook: `__${string}`]: any } } // the playtest's own hooks: window.__writes, __idle, …
 
 const failures = [];
 const fail = (msg) => failures.push(msg);
@@ -67,7 +69,7 @@ const LIKE_KEY = "inkchime:like";
  * (unreachable); "slow" (answers after 8 s, past the page's 6 s timeout). `next`
  * forces the status of the next POST or DELETE (409, 429); `delay` holds each one.
  */
-async function mockLikes(context, opts = {}) {
+async function mockLikes(context, opts: { mode?: string; total?: number; delay?: number; expectRefusals?: boolean } = {}) {
   const api = { mode: "ok", total: 12, delay: 0, next: null, receipts: [], calls: [], ...opts };
   const origin = new URL(base).origin;
   await context.route(`${LAB}/**`, async (route) => {
@@ -117,7 +119,7 @@ async function mockLikes(context, opts = {}) {
  * `likes` sets up the mocked like API (working, 12 likes, unless it says otherwise),
  * `init` runs in the page before its own scripts, and `waitUntil` is when loading counts as done.
  */
-async function openPage(browser, name, ctxOptions, url = base, { likes = {}, init, waitUntil = "networkidle" } = {}) {
+async function openPage(browser, name, ctxOptions, url = base, { likes = {}, init, waitUntil = "networkidle" }: { likes?: Parameters<typeof mockLikes>[1]; init?: () => void; waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit" } = {}) {
   const context = await browser.newContext({ ...ctxOptions, permissions: ["clipboard-read", "clipboard-write"] });
   const api = await mockLikes(context, likes);
   if (init) await context.addInitScript(init);
@@ -284,7 +286,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
 
   // Keyboard: Tab reaches the canvas and every control, in order, each with a visible focus ring.
   await check(`${name} tab order`, async () => {
-    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     const seen = [];
     for (let i = 0; i < 9; i++) {
       await page.keyboard.press("Tab");
@@ -300,7 +302,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
     }
     assert.equal(seen.join(" > "), "canvas-wrap > voice > play > undo > clear > share > size > tempo > like", `tab order was ${seen.join(" > ")}`);
     assert.ok(!seen.some((s) => s.includes("no ring")), `a focused control has no visible ring: ${seen.join(", ")}`);
-    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   });
 
   // Drawing stays smooth: scribble a long wavy line and watch the frame times.
@@ -378,7 +380,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
 
   // Keyboard: Space toggles play; Space on a focused button presses that button instead.
   await check(`${name} space toggles play`, async () => {
-    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Space");
     assert.equal((await hook.state(page)).playing, false, "Space should pause");
     assert.equal(await page.locator("#play-label").innerText(), "Play");
@@ -410,7 +412,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
   });
 
   await check(`${name} undo shortcuts`, async () => {
-    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Control+z");
     assert.equal((await hook.song(page)).strokes.length, 0, "Ctrl+Z should undo");
     await drawLine(page, 0.4, 0.6, 0.5);
@@ -456,7 +458,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
   await page.screenshot({ path: join(out, `${name}-shared.png`) });
 
   // Hear the original: play one loop and record what it sounds like.
-  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   const mark = (await hook.events(page)).length;
   await page.keyboard.press("Space");
   await check(`${name} original plays`, async () => {
@@ -865,7 +867,7 @@ async function liveLink(browser, name, viewport, phone) {
     // Stall the idle write, so only the pen-up write can save the stroke, then reload within a few ms of pen-up.
     await page.evaluate(() => {
       window.requestIdleCallback = () => 0;
-      window.setTimeout = () => 0;
+      window.setTimeout = (() => 0) as unknown as typeof setTimeout;
     });
     const before = await hash();
     const want = (await hook.song(page)).strokes.length + 1;
@@ -898,7 +900,7 @@ async function liveLink(browser, name, viewport, phone) {
       window.cancelIdleCallback = (id) => {
         if (id > 0) window.__idle[id - 1] = null;
       };
-      window.setTimeout = () => 0;
+      window.setTimeout = (() => 0) as unknown as typeof setTimeout;
       const replace = history.replaceState.bind(history);
       history.replaceState = (...args) => (window.__writes++, replace(...args));
     });
@@ -951,7 +953,7 @@ async function liveLink(browser, name, viewport, phone) {
     const drag = (from, to) =>
       page.evaluate(
         ([a, b]) => {
-          const el = document.querySelector("#tempo");
+          const el = document.querySelector<HTMLInputElement>("#tempo");
           for (let v = a; v <= b; v++) {
             el.value = String(v);
             el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1072,14 +1074,14 @@ async function liveLink(browser, name, viewport, phone) {
           page.evaluate(() => {
             Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
             document.dispatchEvent(new Event("visibilitychange"));
-            delete document.visibilityState;
+            delete (document as { visibilityState?: unknown }).visibilityState;
           }),
       ],
-    ]) {
+    ] as const) {
       await stallIdle();
       const bpm = what === "pagehide" ? 77 : 113;
       await page.evaluate((v) => {
-        const el = document.querySelector("#tempo");
+        const el = document.querySelector<HTMLInputElement>("#tempo");
         el.value = String(v);
         el.dispatchEvent(new Event("input", { bubbles: true }));
       }, bpm);
@@ -1122,7 +1124,7 @@ async function heldUndo(browser, name, viewport) {
   if (!ok) return context.close();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const paper = () => page.evaluate(() => document.querySelector("#paper").toDataURL());
+  const paper = () => page.evaluate(() => document.querySelector<HTMLCanvasElement>("#paper").toDataURL());
   const empty = await paper();
   const box = await page.locator("#canvas-wrap").boundingBox();
   const strokes = 150;
@@ -1229,7 +1231,7 @@ async function keyboardDraw(browser, name, viewport, colorScheme) {
   };
 
   await check(`${name} canvas is a keyboard target`, async () => {
-    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await tabs(1);
     assert.equal(await focused(), "canvas-wrap", "the first Tab should reach the canvas");
     const ring = await wrap.evaluate((el) => {
@@ -1371,7 +1373,7 @@ async function keyboardDraw(browser, name, viewport, colorScheme) {
     if (opened.ok) {
       await check(`${name} a placed note ends the invite`, async () => {
         assert.ok(await inviteShown(opened.page), "no invite on a shared link");
-        await opened.page.evaluate(() => document.activeElement && document.activeElement.blur());
+        await opened.page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
         await opened.page.keyboard.press("Tab");
         await opened.page.keyboard.press("Enter");
         await inviteGone(opened.page, "placing a note with Enter");
@@ -1397,7 +1399,7 @@ async function keyboardDraw(browser, name, viewport, colorScheme) {
 /** What the heart shows. */
 const heart = (page) =>
   page.evaluate(() => {
-    const b = document.querySelector("#like");
+    const b = document.querySelector<HTMLButtonElement>("#like");
     return { shown: !b.hidden && !!b.offsetParent, pressed: b.getAttribute("aria-pressed"), label: b.getAttribute("aria-label"), n: b.querySelector(".like-n").textContent };
   });
 const heartReads = (n, pressed) => ({ shown: true, pressed: String(pressed), label: `Like Inkchime, ${n} ${n === 1 ? "like" : "likes"}`, n: String(n) });
@@ -1564,7 +1566,7 @@ const layout = (page) =>
 // taller (a big count is shortened, 1.9k); on the desktop the dock keeps its one row.
 async function likesLayout(browser, name, viewport, phone, total = 12) {
   const ctxOptions = phone ? { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme: "dark" };
-  const seen = {};
+  const seen: Record<string, any> = {};
   for (const mode of ["resting", "ok"]) {
     const { page, context, ok } = await openPage(browser, `${name} (${mode})`, ctxOptions, base, { likes: { mode, total } });
     if (!ok) return context.close();
@@ -1704,7 +1706,7 @@ async function sliderNames(browser, name, viewport, phone) {
 // doesn't scroll, every control is on screen and big enough to tap, and the canvas keeps its height.
 async function landscape(browser, name, viewport) {
   const ctxOptions = { viewport, colorScheme: "light", hasTouch: true, isMobile: true, deviceScaleFactor: 2 };
-  const seen = {};
+  const seen: Record<string, any> = {};
   for (const mode of ["resting", "ok"]) {
     const { page, context, ok } = await openPage(browser, `${name} (${mode})`, ctxOptions, base, { likes: { mode } });
     if (!ok) return context.close();
@@ -1753,7 +1755,7 @@ async function likesQuiet(browser, mode) {
   const init = () => {
     window.__heartSeen = false;
     const look = () => {
-      const b = document.querySelector("#like");
+      const b = document.querySelector<HTMLButtonElement>("#like");
       if (b && !b.hidden && b.offsetParent) window.__heartSeen = true;
       requestAnimationFrame(look);
     };

@@ -4,12 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc -p . --noEmit",
-    "test": "node --test \"tests/unit/*.test.ts\"",
+    "typecheck": "tsc -p . --noEmit && tsc -p tests",
+    "test": "tsc -p tests && node --test \"tests/unit/*.test.ts\"",
     "build": "tsc -p . --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
-    "playtest": "node tests/playtest.mjs"
+    "playtest": "node tests/playtest.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

@@ -1,0 +1,7 @@
+{
+  // The playtest drives a real browser. A DOM lookup that comes back empty already fails the run,
+  // so null checks are off here; everything else is still type-checked.
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "strict": false },
+  "include": ["playtest.ts"]
+}

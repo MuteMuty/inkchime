@@ -12,6 +12,8 @@ import { normalizePoints } from "./core/stroke.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { Player, type NoteEvent } from "./audio/player.ts";
 import { Stage, brushPx } from "./ui/stage.ts";
+import { loadAnalytics, track } from "./analytics.ts";
+import { EVENTS, fromOf, playEvents, PROJECT } from "./analytics-events.ts";
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector<T>(sel)!;
 
@@ -26,6 +28,11 @@ let buckets: Note[][] = [];
 let lastSharedHash = "";
 
 const song = (): Song => ({ bpm, strokes: edits.value });
+
+// Usage events (lab#71): play_started on the first stroke or placed note, play_finished when Share
+// hands out a link, once each per page load, saying only whether the page opened on a song link.
+// Sent through the lab's shared script (see analytics.ts and analytics-events.ts); nothing drawn is sent.
+const plays = playEvents(track, fromOf(fromLink));
 
 /** Waits for a quiet moment, so encoding the link never lands in the middle of drawing. */
 const idle: Schedule = (run) => {
@@ -107,6 +114,7 @@ function commitStroke(stroke: Stroke): void {
   edits.set([...edits.value, stroke]);
   songChanged("stroke");
   stage.addStroke(stroke);
+  plays.started();
 }
 
 const wrap = $("#canvas-wrap");
@@ -337,6 +345,7 @@ $("#share").addEventListener("click", async () => {
   const shared = prepareShare(song());
   if (!shared.ok) return toast("This song is too big to share as a link. Undo or clear a few lines and try again.");
   live.start();
+  plays.finished();
   // If the browser refuses the address-bar write just now, the link still follows a moment later.
   try {
     setHash(shared.hash);
@@ -460,6 +469,8 @@ showCursor();
 if (invite.showing) requestAnimationFrame(() => invite.showing && showInvite());
 // The counts load once the canvas is ready; nothing waits for them.
 void likes.load();
+// The shared analytics script comes once the page is idle, and only where it may send.
+loadAnalytics(PROJECT, EVENTS);
 
 // Read-only view for the playtest: headless browsers can't be heard, so it
 // reports what was handed to Web Audio instead.

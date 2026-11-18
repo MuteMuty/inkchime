@@ -9,11 +9,16 @@
 // Usage: node tests/playtest.ts <baseUrl>
 // Env:   PLAYTEST_BROWSER  Chromium-based browser executable (default: Brave)
 //        PLAYTEST_OUT      screenshot folder (default: ./playtest-out)
+//        LAB_ANALYTICS_JS  the hub's built shared analytics script (default: the lab
+//                          checkout's hub/public/analytics/v1.js; build it there with
+//                          `npm run bundle`). The live one is never loaded.
 // Exit:  0 = pass, 1 = fail (reasons printed)
 import { chromium } from "playwright";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { gunzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 
 const base = process.argv[2];
@@ -27,6 +32,7 @@ const browserPath = process.env.PLAYTEST_BROWSER || "/Applications/Brave Browser
 mkdirSync(out, { recursive: true });
 
 declare global { interface Window { [hook: `__${string}`]: any } } // the playtest's own hooks: window.__writes, __idle, …
+declare global { interface Window { labAnalytics?: { queue: any } } } // the shared analytics queue (src/analytics.ts)
 
 const failures = [];
 const fail = (msg) => failures.push(msg);
@@ -278,7 +284,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
     assert.equal(await page.locator("input[name=voice]").count() >= 3, true, "need at least 3 colours");
     const names = await page.locator(".voice .name").allInnerTexts();
     assert.ok(new Set(names).size === names.length && names.length >= 3, "each colour should name a different instrument");
-    assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab$/);
+    assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab\. Privacy$/);
     await noInvite(page, "on a normal visit");
   });
   await noHorizontalOverflow(page, name, "empty");
@@ -1785,6 +1791,290 @@ async function likesQuiet(browser, mode) {
   await context.close();
 }
 
+// --- the footer's Privacy link (lab#71) ----------------------------------------------
+// After "Made by Erik Pahor at BrightLoop Lab.", styled like the footer's other links, on screen and
+// clickable in light and dark, at desktop and phone sizes and held sideways (where the footer sits
+// under the canvas, beside the dock).
+const PRIVACY = `${LAB}/privacy`;
+async function footerPrivacy(browser) {
+  const sizes = [
+    ["desktop", { width: 1280, height: 900 }, false],
+    ["phone", { width: 390, height: 844 }, true],
+    ["landscape-phone", { width: 844, height: 390 }, true],
+    ["landscape-smallest-phone", { width: 568, height: 320 }, true],
+  ] as const;
+  for (const [size, viewport, phone] of sizes) {
+    for (const colorScheme of ["light", "dark"] as const) {
+      const name = `footer-${size}-${colorScheme}`;
+      const ctxOptions = phone ? { viewport, colorScheme, hasTouch: true, isMobile: true, deviceScaleFactor: 2 } : { viewport, colorScheme };
+      const { page, context, ok } = await openPage(browser, name, ctxOptions);
+      if (!ok) {
+        await context.close();
+        continue;
+      }
+      await check(`${name} Privacy link`, async () => {
+        const f = await page.evaluate((href) => {
+          const link = document.querySelector<HTMLAnchorElement>(`.foot a[href="${href}"]`);
+          if (!link) return null;
+          const lab = link.previousElementSibling as HTMLElement;
+          const r = link.getBoundingClientRect();
+          const style = (e: Element) => {
+            const s = getComputedStyle(e);
+            return `${s.color} ${s.textDecorationLine} ${s.fontSize} ${s.fontFamily}`;
+          };
+          return {
+            text: link.textContent,
+            before: lab?.textContent,
+            last: link === link.parentElement.lastElementChild,
+            line: link.parentElement.textContent.replace(/\s+/g, " ").trim(),
+            hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === link,
+            inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && r.width > 0,
+            same: style(link) === style(lab),
+            oneLine: Math.round(r.top) === Math.round(lab.getBoundingClientRect().top),
+          };
+        }, PRIVACY);
+        assert.ok(f, `no Privacy link to ${PRIVACY}`);
+        assert.equal(f.line, "Made by Erik Pahor at BrightLoop Lab. Privacy");
+        assert.ok(f.text === "Privacy" && f.before === "BrightLoop Lab" && f.last, `the footer should end "BrightLoop Lab. Privacy", got "${f.line}"`);
+        assert.ok(f.hit && f.inside, `the Privacy link should be on screen and clickable, got ${JSON.stringify(f)}`);
+        assert.ok(f.same, "the Privacy link should look like the footer's other links");
+        assert.ok(f.oneLine, "the footer line should stay on one line");
+      });
+      await noHorizontalOverflow(page, name, "footer");
+      await page.locator(".foot").screenshot({ path: join(out, `${name}.png`) });
+      if (size === "landscape-smallest-phone" && colorScheme === "dark") await page.screenshot({ path: join(out, `${name}-page.png`) });
+      await context.close();
+    }
+  }
+  console.log("footer: Privacy link after BrightLoop Lab, on screen, clickable and styled like it, light and dark at 1280x900, 390x844, 844x390 and 568x320");
+}
+
+// --- usage events (lab#71) -------------------------------------------------------------
+// On localhost every check above already fails on any request but Inkchime and the like API, so the
+// shared script is never fetched there. Here Inkchime runs under a made-up
+// inkchime.playtest.brightloopapps.com, answered by the local server, with the hub's built script
+// served from LAB_ANALYTICS_JS (never the live one) and PostHog answered here, so nothing reaches it.
+// Drawing (before a slow script arrives), placing a note, Share, more drawing and Share again send
+// exactly $pageview, one play_started and one play_finished, from "blank"; a song link sends the same
+// from "link". No payload holds the song or its link, addresses have no # or ?, events are marked
+// cookieless, set no person properties, and analytics leaves no cookies or storage. With Do Not Track,
+// with Global Privacy Control and on a workers.dev preview the script isn't fetched and PostHog isn't
+// contacted; with the script blocked Inkchime draws and shares with no console error of its own.
+const ANALYTICS_JS = process.env.LAB_ANALYTICS_JS || join(homedir(), "brightloop-lab/lab/hub/public/analytics/v1.js");
+
+/** What posthog sent in one request: a list of events. */
+function decodeEvents(body) {
+  if (!body?.length) return [];
+  let text = body[0] === 0x1f ? gunzipSync(body).toString() : body.toString();
+  if (text.startsWith("data=")) text = Buffer.from(decodeURIComponent(text.slice(5)), "base64").toString();
+  const v = JSON.parse(text);
+  return Array.isArray(v) ? v : (v.batch ?? [v]);
+}
+
+async function analyticsFlow(browser) {
+  let script;
+  try {
+    script = readFileSync(ANALYTICS_JS);
+  } catch {
+    fail(`analytics: no shared script at ${ANALYTICS_JS}: build it in the lab's hub with npm run bundle, or set LAB_ANALYTICS_JS`);
+    return;
+  }
+  // posthog skips automated browsers, so the browser has to look like a person's.
+  const probe = await browser.newPage();
+  const userAgent = (await probe.evaluate(() => navigator.userAgent)).replace("HeadlessChrome", "Chrome");
+  await probe.close();
+  const host = "inkchime.playtest.brightloopapps.com";
+
+  /** Inkchime under `host` at `path`, with the hub's script `scriptMode` ("ok", "slow" or "blocked"). `act` draws. */
+  const run = async (label, h, path, act, { dnt = null as string | null, gpc = false, scriptMode = "ok" } = {}) => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: "dark", userAgent, permissions: ["clipboard-read", "clipboard-write"] });
+    await ctx.addInitScript(
+      ([dnt, gpc]) => {
+        Object.defineProperty(Navigator.prototype, "webdriver", { get: () => false });
+        Object.defineProperty(Navigator.prototype, "userAgentData", { get: () => undefined });
+        Object.defineProperty(Navigator.prototype, "doNotTrack", { get: () => dnt, configurable: true });
+        Object.defineProperty(Navigator.prototype, "globalPrivacyControl", { get: () => gpc, configurable: true });
+      },
+      [dnt, gpc] as const,
+    );
+    const r = { events: [], bodies: [] as string[], scripts: 0, hosts: new Set<string>(), hashes: new Set<string>() };
+    await ctx.route((u) => u.hostname === h, async (route) => {
+      const u = new URL(route.request().url());
+      await route.fulfill({ response: await route.fetch({ url: new URL(u.pathname + u.search, base).href }) });
+    });
+    await ctx.route(`${LAB}/**`, async (route) => {
+      const url = new URL(route.request().url());
+      const cors = { "access-control-allow-origin": `https://${h}`, vary: "Origin" };
+      if (url.pathname === "/analytics/v1.js") {
+        r.scripts++;
+        if (scriptMode === "blocked") return route.abort("blockedbyclient");
+        if (scriptMode === "slow") await new Promise((done) => setTimeout(done, 2500));
+        return route.fulfill({ contentType: "text/javascript", body: script });
+      }
+      if (url.pathname === "/privacy") return route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Privacy</title><h1>Privacy</h1>" });
+      if (url.pathname === "/api/likes") return route.fulfill({ headers: cors, contentType: "application/json", body: JSON.stringify({ inkchime: { total: 3, week: 1 } }) });
+      fail(`${label}: the page asked ${url.href}`);
+      return route.abort();
+    });
+    await ctx.route((u) => /(^|\.)posthog\.com$/.test(u.hostname), async (route) => {
+      const req = route.request();
+      if (new URL(req.url()).hostname !== "eu.i.posthog.com") {
+        fail(`${label}: analytics contacted ${req.url()}`);
+        return route.abort();
+      }
+      r.bodies.push(req.url());
+      try {
+        const sent = decodeEvents(req.postDataBuffer());
+        r.events.push(...sent);
+        r.bodies.push(JSON.stringify(sent));
+      } catch (e) {
+        fail(`${label}: couldn't read what analytics sent to ${req.url()}: ${e.message}`);
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"Ok"}' });
+    });
+    const page = await ctx.newPage();
+    page.on("request", (q) => {
+      const u = new URL(q.url());
+      if (u.protocol.startsWith("http")) r.hosts.add(u.hostname);
+    });
+    // A blocked script shows up as the browser's own network line; anything else is ours.
+    page.on("console", (m) => m.type() === "error" && !(scriptMode === "blocked" && /Failed to load resource/.test(m.text())) && fail(`${label}: console error: ${m.text()}`));
+    page.on("pageerror", (e) => fail(`${label}: page error: ${e.message}`));
+    await page.goto(`https://${h}${path}`, { waitUntil: "load" });
+    if (!(await page.waitForSelector("#canvas-wrap canvas", { state: "attached", timeout: 8000 }).catch(() => null))) fail(`${label}: canvas never rendered`);
+    else await check(label, () => act(page, r));
+    const kept = await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage) }));
+    for (const k of kept.local.filter((k) => k !== LIKE_KEY)) fail(`${label}: analytics left localStorage "${k}"`);
+    for (const k of kept.session) fail(`${label}: analytics left sessionStorage "${k}"`);
+    for (const c of await ctx.cookies()) fail(`${label}: analytics left cookie "${c.name}" on ${c.domain}`);
+    const allowedHosts = new Set([h, new URL(LAB).hostname, ...(scriptMode !== "blocked" && !dnt && !gpc && h.endsWith(".brightloopapps.com") ? ["eu.i.posthog.com"] : [])]);
+    for (const x of r.hosts) if (!allowedHosts.has(x)) fail(`${label}: the page contacted ${x}`);
+    await ctx.close();
+    return r;
+  };
+  const scriptLoaded = (page) => page.evaluate(() => performance.getEntriesByType("resource").some((e) => e.name.endsWith("/analytics/v1.js")));
+  /** Share, and remember the link it wrote, so no payload may hold it. */
+  const share = async (page, r) => {
+    await page.locator("#share").click();
+    await page.waitForFunction(() => location.hash.startsWith("#v1."), null, { timeout: 3000 });
+    r.hashes.add(await page.evaluate(() => location.hash));
+  };
+  /** A note placed with the keys: on the focused canvas, an arrow key, then Enter. */
+  const placeNote = async (page) => {
+    await page.locator("#canvas-wrap").focus();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Enter");
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  };
+  const waitForScript = async (page, label) => {
+    if (!(await page.waitForFunction(() => performance.getEntriesByType("resource").some((e) => e.name.endsWith("/analytics/v1.js")), null, { timeout: 8000 }).catch(() => null)))
+      fail(`${label}: the analytics script never loaded`);
+  };
+
+  /** Exactly $pageview, play_started and play_finished from `from`, with nothing of the song anywhere. */
+  const checkSent = (label, r, from) => {
+    const ours = (e) => Object.fromEntries(Object.entries(e.properties ?? {}).filter(([k]) => !k.startsWith("$") && !["token", "distinct_id", "project"].includes(k)));
+    const seen = r.events.map((e) => `${e.event} ${JSON.stringify(ours(e))}`).sort();
+    const wanted = ["$pageview {}", `play_finished ${JSON.stringify({ from })}`, `play_started ${JSON.stringify({ from })}`];
+    if (seen.join("\n") !== wanted.join("\n")) fail(`${label}: sent\n    ${seen.join("\n    ")}\n  want\n    ${wanted.join("\n    ")}`);
+    if (r.events[0]?.event !== "$pageview") fail(`${label}: the first event is ${r.events[0]?.event}, not $pageview`);
+    for (const e of r.events) {
+      const p = e.properties ?? {};
+      if (p.project !== "inkchime") fail(`${label}: ${e.event} is for project ${p.project}`);
+      if (e.$set || e.$set_once || p.$set || p.$set_once) fail(`${label}: ${e.event} set person properties`);
+      if (p.$cookieless_mode !== true) fail(`${label}: ${e.event} isn't marked cookieless`);
+      if (typeof p.$current_url !== "string" || p.$current_url !== `https://${host}/`) fail(`${label}: ${e.event} sent the address ${p.$current_url}`);
+      for (const [k, v] of Object.entries(p)) if (typeof v === "string" && /^https?:/.test(v) && /[?#]/.test(v)) fail(`${label}: ${e.event} sent ${k} = ${v}`);
+    }
+    // The song lives in the link's hash: no request may hold it, or any part of its payload.
+    if (!r.hashes.size) fail(`${label}: Share never wrote a song link`);
+    for (const hash of r.hashes) {
+      const payload = hash.slice("#v1.".length);
+      for (const body of r.bodies) {
+        if (body.includes("#v1") || body.includes(payload) || body.includes(payload.slice(0, 16))) fail(`${label}: analytics sent the song link (${hash.slice(0, 24)}…)`);
+      }
+    }
+  };
+
+  // Production, from an empty canvas: two lines (the first before the slow script arrives), a note
+  // placed with the keys, Share, another line (the address bar follows), and Share again.
+  let songLink = "";
+  const blank = await run("analytics blank canvas", host, "/", async (page, r) => {
+    await drawLine(page, 0.05, 0.3, rowCentre(4));
+    if (await scriptLoaded(page)) throw new Error("the first line should be drawn before the slow analytics script arrives");
+    assert.equal((await hook.song(page)).strokes.length, 1, "the first line wasn't added");
+    await pickColour(page, "Pad");
+    await drawLine(page, 0.4, 0.7, rowCentre(9));
+    await placeNote(page);
+    assert.equal((await hook.song(page)).strokes.length, 3, "a line or the placed note wasn't added");
+    await share(page, r);
+    await drawLine(page, 0.75, 0.95, rowCentre(2));
+    await page.waitForFunction((n) => location.hash.length > n, (await page.evaluate(() => location.hash.length)) - 1, { timeout: 3000 });
+    r.hashes.add(await page.evaluate(() => location.hash));
+    await setTempo(page, 72);
+    await share(page, r);
+    songLink = await page.evaluate(() => location.href);
+    await waitForScript(page, "analytics blank canvas");
+    const t = await page.evaluate(() => {
+      const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
+      return { loaded: nav.loadEventEnd, started: performance.getEntriesByType("resource").find((e) => e.name.endsWith("/analytics/v1.js"))?.startTime };
+    });
+    assert.ok(t.started >= t.loaded, `analytics started at ${Math.round(t.started)} ms, before the page loaded at ${Math.round(t.loaded)} ms`);
+    await page.waitForFunction(() => Array.isArray(window.labAnalytics?.queue) === false, null, { timeout: 5000 });
+    await page.waitForTimeout(1500);
+    // The footer's Privacy link opens the note.
+    await Promise.all([page.waitForURL(PRIVACY, { timeout: 5000 }), page.click(`.foot a[href="${PRIVACY}"]`)]);
+  }, { scriptMode: "slow" });
+  checkSent("analytics blank canvas", blank, "blank");
+  console.log(`analytics blank canvas: ${blank.events.map((e) => `${e.event}${e.properties?.from ? ` (${e.properties.from})` : ""}`).join(", ")}; first line drawn before the script arrived; no song data, cookies or storage`);
+
+  // Production, opening that song link: a line, then Share.
+  if (!songLink) return fail("analytics song link: no song link to open");
+  const link = await run("analytics song link", host, new URL(songLink).pathname + new URL(songLink).hash, async (page, r) => {
+    r.hashes.add(new URL(songLink).hash);
+    assert.ok((await hook.song(page)).strokes.length >= 4, "the song link didn't open the song");
+    await waitForScript(page, "analytics song link");
+    await drawLine(page, 0.1, 0.2, rowCentre(12));
+    await share(page, r);
+    await page.waitForTimeout(1500);
+  });
+  checkSent("analytics song link", link, "link");
+  console.log(`analytics song link: ${link.events.map((e) => `${e.event}${e.properties?.from ? ` (${e.properties.from})` : ""}`).join(", ")}; $pageview's address without the song`);
+
+  // Do Not Track, Global Privacy Control, a workers.dev preview: no script, nothing sent.
+  for (const [label, h, opts] of [
+    ["analytics do not track", host, { dnt: "1" }],
+    ["analytics global privacy control", host, { gpc: true }],
+    ["analytics workers.dev", "inkchime.playtest.workers.dev", {}],
+  ] as const) {
+    const quiet = await run(label, h, "/", async (page, r) => {
+      await drawLine(page, 0.1, 0.5, rowCentre(6));
+      await share(page, r);
+      await page.waitForTimeout(3500); // past the idle timeout, when the script would have been added
+      assert.equal(await page.evaluate(() => window.labAnalytics === undefined), true, "the analytics queue was set up");
+    }, opts);
+    if (quiet.scripts) fail(`${label}: the page fetched the analytics script`);
+    if (quiet.events.length || quiet.hosts.has("eu.i.posthog.com")) fail(`${label}: analytics sent ${quiet.events.map((e) => e.event).join(", ")}`);
+  }
+
+  // The script blocked (an ad blocker, say): drawing, sound and Share work, the events just wait in the queue.
+  const blocked = await run("analytics script blocked", host, "/", async (page, r) => {
+    await drawLine(page, 0.1, 0.5, rowCentre(6));
+    await page.locator("#play").click();
+    await page.waitForFunction(() => window.__inkchime.events().length > 0, null, { timeout: 4000 });
+    await page.locator("#play").click();
+    await share(page, r);
+    await page.waitForTimeout(3500);
+    const q = await page.evaluate(() => {
+      const q = window.labAnalytics?.queue;
+      return Array.isArray(q) ? q.map((e) => e[0]) : null;
+    });
+    assert.equal(q?.join(), "play_started,play_finished", `queued ${JSON.stringify(q)}, want play_started and play_finished`);
+  }, { scriptMode: "blocked" });
+  if (blocked.scripts !== 1 || blocked.events.length) fail(`analytics script blocked: ${blocked.scripts} script requests, ${blocked.events.length} events`);
+  console.log("analytics: no script and nothing sent with Do Not Track, GPC or on workers.dev; harmless when blocked");
+}
+
 // --- run ---------------------------------------------------------------------------
 
 const launchOptions = existsSync(browserPath) ? { executablePath: browserPath } : {};
@@ -1821,6 +2111,8 @@ try {
   await sliderNames(browser, "slider-names-landscape", { width: 844, height: 390 }, true);
   await sliderNames(browser, "slider-names-desktop", { width: 1280, height: 900 }, false);
   for (const mode of ["resting", "down", "slow"]) await likesQuiet(browser, mode);
+  await footerPrivacy(browser);
+  await analyticsFlow(browser);
 } finally {
   await browser.close();
 }

@@ -284,7 +284,7 @@ async function session(browser, name, viewport, colorScheme, phone) {
     assert.equal(await page.locator("input[name=voice]").count() >= 3, true, "need at least 3 colours");
     const names = await page.locator(".voice .name").allInnerTexts();
     assert.ok(new Set(names).size === names.length && names.length >= 3, "each colour should name a different instrument");
-    assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab\. Privacy$/);
+    assert.match(await page.locator("footer").innerText(), /^Made by Erik Pahor at BrightLoop Lab\. Source Privacy$/);
     await noInvite(page, "on a normal visit");
   });
   await noHorizontalOverflow(page, name, "empty");
@@ -1834,8 +1834,8 @@ async function footerPrivacy(browser) {
           };
         }, PRIVACY);
         assert.ok(f, `no Privacy link to ${PRIVACY}`);
-        assert.equal(f.line, "Made by Erik Pahor at BrightLoop Lab. Privacy");
-        assert.ok(f.text === "Privacy" && f.before === "BrightLoop Lab" && f.last, `the footer should end "BrightLoop Lab. Privacy", got "${f.line}"`);
+        assert.equal(f.line, "Made by Erik Pahor at BrightLoop Lab. Source Privacy");
+        assert.ok(f.text === "Privacy" && f.before === "Source" && f.last, `the footer should end "BrightLoop Lab. Source Privacy", got "${f.line}"`);
         assert.ok(f.hit && f.inside, `the Privacy link should be on screen and clickable, got ${JSON.stringify(f)}`);
         assert.ok(f.same, "the Privacy link should look like the footer's other links");
         assert.ok(f.oneLine, "the footer line should stay on one line");

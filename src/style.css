@@ -493,6 +493,14 @@ input[type="range"]:focus-visible { outline: 2.5px solid var(--focus); outline-o
   }
 }
 
+/* The narrowest phones held sideways (568 by 320): the footer column is about 310px wide, so the
+   footer's small print shrinks a little and its side padding narrows, to keep "Made by … Source
+   Privacy" on one line (about 279px of text in a 294px line). */
+@media (orientation: landscape) and (max-height: 499.98px) and (max-width: 640px) {
+  .foot { padding-left: 4px; padding-right: 4px; }
+  .foot p { font-size: 0.68rem; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
   .like.pop .heart { animation: none; }

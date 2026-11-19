@@ -2,6 +2,14 @@
 
 **Draw lines, hear music.** Play it at **[inkchime.brightloopapps.com](https://inkchime.brightloopapps.com)**.
 
+![A song on the Inkchime canvas: wavy lines in four colours, with the playhead crossing them](docs/screenshot.jpg)
+
+## Why it exists
+
+A BrightLoop Lab project, launched on 13 Nov 2026. It was built by the Lab's night shift from my brief; I reviewed it and decided to launch it.
+
+## How to play
+
 Draw on the canvas with a mouse, finger or pen. A playhead sweeps left to right, looping every 4 to 8 seconds, and each line sounds as the playhead crosses it.
 
 | You draw | You hear |
@@ -19,7 +27,7 @@ Keys: **Space** plays and pauses (on a focused button it presses that button ins
 
 You can also draw with the keyboard alone. **Tab** to the canvas (the first stop on the page) and a cursor appears on the grid of 32 columns by 15 rows. The **arrow keys** move it, stopping at the edges, and **Enter** or **N** places a short note in that cell with the current colour and brush size. A placed note is an ordinary stroke: Undo, Share and the address bar treat it like a line you drew, and opening a song link and placing a note ends the invite just like drawing. Screen readers hear the canvas described with these keys, and a polite announcement says where the cursor is ("Column 5, pitch E4") and what was placed ("Bell, column 5, pitch E4"). Pick the colour and brush with Tab and the arrow keys as usual. Clicking or touching the canvas hides the cursor until the next key.
 
-## How it's built
+## How it works
 
 | Part | What it does |
 |---|---|
@@ -33,11 +41,7 @@ The built page is about 11 KB of JavaScript gzipped, no dependencies at runtime,
 
 ### The share format
 
-`#v1.` and then URL-safe base64 of: a version byte, the tempo, and for each stroke its colour and size, then its points as a start position plus zigzag-varint deltas. Strokes are quantised to a 1024 by 1024 grid and simplified when you lift the pen, so the song in memory is exactly the song a link rebuilds. A straight line costs about 20 characters and a long hand-drawn wave about 150. A link that is malformed, truncated or out of range opens an empty canvas and never throws.
-
-A song holds at most 400 strokes (drawing stops there, with a note), and a link payload is at most 120,000 characters; both limits live in `core/model.ts` and are used by drawing, encoder and decoder. Share decodes the link it is about to copy and only claims success if it opens to the same song. If the payload is too long it simplifies the points further, but only as far as the notes stay identical; otherwise it says the song is too big to share.
-
-After Share, the address bar follows the song, rewritten with `history.replaceState` so it never adds a Back step and never runs in the middle of a stroke. Every discrete edit (lifting the pen, placing a note with the keys, undo, clear, letting go of the tempo slider) is written straight away, because a reload starts from the address it was given, and Chromium fixes that address before `pagehide` runs: a reload a few milliseconds after any of them still keeps it. Dragging the tempo slider is the one edit that comes as a stream, so it waits for the next idle moment and is written at most once per quiet moment, not once per input event. A drag still waiting is written as soon as the tab is hidden (`visibilitychange`, `pagehide`), so a phone that drops a background tab and reopens it gets the latest song. Browsers cap these writes (Safari throws past 100 in 30 seconds, Chromium skips them), so writes come from a small budget: a burst of five at once, then about three a second. A single edit is never held back, while holding Ctrl or ⌘ Z writes at the pace the browser allows and catches up once the key is let go. Letting go of the tempo slider may borrow a few writes from that budget, so it is written at once even when a long drag has spent it on idle writes, and a reload right after opens the tempo it was let go at. Arrow keys held on the slider count as a drag until the key is let go. If the browser still refuses a write, the edit goes through anyway and the write is tried again a second later, or when the tab is hidden. It goes through the same checks as Share: if the song stops fitting, the address bar keeps the last link that did, and a note says so. Clearing gives a link to an empty canvas at the same tempo. The history entry Share wrote is marked, so a reload of that tab keeps following; the same link opened anywhere else behaves as before until its own Share.
+A song lives entirely in the link: `#v1.` and then URL-safe base64 of the tempo and every stroke. Nothing is stored on a server. The full format, its limits and how the address bar follows the song are in [`docs/share-format.md`](docs/share-format.md).
 
 ## Run it
 
@@ -61,8 +65,10 @@ node tests/playtest.ts http://localhost:4173
 #                   build it in the lab's hub with npm run bundle). The live one is never loaded.
 ```
 
-It checks, at 1280 by 900 and 390 by 844: a drawn stroke is added; pressing play schedules its notes at the right times, with pitch from height and gain from thickness; the first sound comes within about 100 ms of the press; Space, Ctrl or ⌘ Z and the Tab order work; with the keyboard alone (light and dark) the canvas takes focus with a visible ring, the arrows move a clamped cursor, Enter and N place notes in the current colour and size that are announced, undone, heard on Play, shared, followed by the live link and end the invite, and a click hides the cursor again; Share, then opening the link in a fresh page, gives the same strokes and the same note schedule, with an invite to press Play that Play, drawing or another song ends (and that a normal visit, a broken link, an empty-canvas link or the author's own reload never shows); before Share the address bar is left alone, and after it every stroke, undo, tempo change and clear is followed, so a reload gives the same song, even one a few milliseconds after pen-up, undo, a placed note, letting go of the tempo slider or clear (with the idle write stalled), while a tempo drag writes once per idle moment rather than per input event, a reload right after letting go of a long tempo drag or a held arrow key (with real idle writes spending the budget) opens the tempo it was let go at while the drag stays within the budget, a tempo drag still waiting is written on `pagehide` and `visibilitychange`, holding Ctrl+Z through 150 strokes while the browser refuses address-bar writes undoes every one with no page errors and the address bar catches up afterwards, with no new history entry and no dropped frames while drawing; broken links open an empty canvas; the like heart (against a mocked like API, never the live one) likes at once, survives a reload, unlikes with the stored receipt (also days later), works by keyboard with its label and `aria-pressed`, rolls back a 409 or 429 with a note, sets no cookies, and leaves the address bar, history, live link and play invite alone; it fits the dock without making it taller at 320, 390 and 1280 wide; held sideways at 844 by 390 and 667 by 375, with the heart and without, the page doesn't scroll, every control is on screen and at least 44px, the canvas is at least 200px tall and still takes a line; held sideways at 844 by 390, 667 by 375 and 568 by 320, every toast sits centred over the canvas and never on the dock; a 1024 by 499 window gets the side dock and a 1024 by 500 one keeps it below; the Brush slider is named by its visible label alone and described by its hint, and the bpm readout is not a live region, so each slider is read once; with the like API resting (204), down or slow, the heart never shows, drawing and playback don't wait and nothing errors; the page asks nothing but its own origin and the like API, so on localhost the analytics script is never fetched; the footer's Privacy link sits after "BrightLoop Lab", styled like it, on screen and clickable in light and dark at 1280 by 900, 390 by 844, 844 by 390 and 568 by 320; under a made-up `*.brightloopapps.com` address (with the hub's built analytics script and PostHog both answered locally), drawing, a placed note, Share, more drawing and Share again send exactly `$pageview`, one `play_started` and one `play_finished` from `blank`, and opening the song link sends the same from `link`, with no request holding the song or its link, every address without `#` or `?`, the first line drawn before a slow script arrives, which loads only after the page has, and no cookies or storage of analytics' own; with Do Not Track, Global Privacy Control or on a workers.dev address the script isn't fetched and nothing is sent, and with it blocked Inkchime draws, plays and shares with no console error; nothing overflows sideways; and the console stays free of errors.
+The full list of what it checks is in [`docs/playtest.md`](docs/playtest.md).
 
-MIT licence. See [`LICENSE`](LICENSE).
+## Status
+
+Live at [inkchime.brightloopapps.com](https://inkchime.brightloopapps.com) since 13 Nov 2026. MIT licence. See [`LICENSE`](LICENSE).
 
 Made by [Erik Pahor](https://github.com/MuteMuty) at [BrightLoop Lab](https://lab.brightloopapps.com).
